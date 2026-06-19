@@ -2,11 +2,13 @@
 
 ## Project overview
 
-Physics-informed financial analysis ที่ผสม quantitative signals (Hurst exponent, IC score) กับ LLM reasoning ผ่าน ReAct agent โดยมี LangSmith tracing สำหรับ observability และ SQLite สำหรับ portfolio persistence
+Physics-informed financial analysis ที่ผสม quantitative signals (Hurst exponent, IC Score, IR) กับ LLM reasoning ผ่าน ReAct agent โดยมี LangSmith tracing สำหรับ observability และ SQLite สำหรับ portfolio persistence
 
 เป้าหมายสองอย่างพร้อมกัน: portfolio project สำหรับสมัครงาน FinTech และ tool ใช้งานจริงสำหรับนักลงทุน
 
 หลักการ scope: **จบและ demo ได้ สำคัญกว่าทะเยอทะยานแล้วค้าง**
+
+Positioning: **Explainable Quant Analytics + Agent Orchestration** — ไม่แข่งเรื่อง model complexity
 
 ---
 
@@ -15,14 +17,15 @@ Physics-informed financial analysis ที่ผสม quantitative signals (Hur
 | Layer | Technology | หมายเหตุ |
 |---|---|---|
 | LLM (dev) | Groq — `openai/gpt-oss-120b` | `reasoning_effort="low"`, tool orchestration เสถียร |
-| LLM (prod) | Gemini 2.5 Flash | swap ตอน deploy + Google Search grounding |
+| LLM (prod) | Gemini 2.5 Flash | swap ตอน deploy |
+| LLM (news) | OpenAI `gpt-4o-mini` | `_news_model` ใน `search_market_news` — Gemini free tier 20 req/day หมดเร็ว |
 | Agent framework | LangGraph `create_react_agent` | prebuilt ReAct |
-| Market data | yfinance | real-time price, fundamentals, history |
+| Market data | yfinance (via `YFinanceProvider`) | real-time price, fundamentals, history |
 | Observability | LangSmith | **explicit binding — ไม่พึ่ง env vars** |
-| Backend | FastAPI + Pydantic v2 | async endpoints + ngrok สำหรับ Colab |
-| Database | SQLite + SQLAlchemy async | `aiosqlite` + `nest_asyncio` สำหรับ Colab |
+| Backend | FastAPI + Pydantic v2 | async endpoints + ngrok สำหรับ local dev |
+| Database | SQLite + SQLAlchemy async | `aiosqlite` + `nest_asyncio` สำหรับ Windows/Colab |
 | Package manager | uv | `pyproject.toml` + `.venv` (Python 3.11) |
-| Environment | Google Colab / local (uv) → Docker (planned) | |
+| Environment | local (uv) / Google Colab → Docker (planned) | |
 
 ### Model decision log
 - ❌ Llama 3.3 70B — ภาษาไทยดีกว่า แต่ tool orchestration อ่อนกว่า
@@ -39,17 +42,38 @@ User query
 run_financial_agent() @traceable → return trace_id (run_id)
     ↓
 ReAct Agent (LangGraph + gpt-oss-120b)
-    ├── get_stock_price            → yfinance (5d)
-    ├── get_stock_financials       → yfinance .info
-    ├── get_hurst_exponent         → yfinance 1Y + numpy R/S + IC score (merged)
-    ├── analyze_portfolio_risk     → yfinance 1Y + numpy/pandas (UC-2a)
-    ├── track_portfolio            → SQLite + yfinance 5d (UC-2b)
-    └── search_market_news         → Gemini 2.5-flash + Google Search grounding
+    ├── get_stock_price            → YFinanceProvider → 5d history
+    ├── get_stock_financials       → YFinanceProvider → .info
+    ├── get_hurst_exponent         → YFinanceProvider 1Y + numpy R/S + Rolling Hurst + IC + IR
+    ├── analyze_portfolio_risk     → YFinanceProvider 1Y + numpy/pandas (amount-based)
+    ├── track_portfolio            → SQLite + YFinanceProvider 5d
+    └── search_market_news         → OpenAI gpt-4o-mini (Gemini quota: 20 req/day)
         ↓
 LangSmith (traces ทุก step)
     ↓
 FastAPI (4 endpoints) + ngrok tunnel
 ```
+
+---
+
+## Data layer
+
+### DataProvider Protocol (Cell 3.5 — ใหม่ใน v1.5)
+
+```python
+class DataProvider(Protocol):
+    def get_history(self, ticker: str, period: str) -> pd.DataFrame: ...
+    def get_info(self, ticker: str) -> dict: ...
+
+class YFinanceProvider:
+    """concrete implementation — สลับ Polygon/DuckDB ใน v2 ได้โดยไม่แตะ logic"""
+    def get_history(self, ticker, period):
+        return yf.Ticker(ticker).history(period=period)
+    def get_info(self, ticker):
+        return yf.Ticker(ticker).info
+```
+
+ประโยชน์: test ง่าย (mock provider แทน yfinance จริง), เปลี่ยน data source ใน v2 โดยไม่ refactor tools
 
 ---
 
@@ -60,10 +84,9 @@ FastAPI (4 endpoints) + ngrok tunnel
 - Tools: `get_stock_price` + `get_stock_financials` + `get_hurst_exponent`
 
 ### UC-2a: วางแผน portfolio ก่อนซื้อ ✅ (amount-based)
-- Input: `{ticker: amount}` — จำนวนเงินลงทุน tool คำนวณ weights เอง
-- Metrics: Annualized Return/Volatility, Sharpe, Sortino, **Calmar**, VaR 95%, CVaR 95%, Max Drawdown, correlation matrix
-- Tools: `analyze_portfolio_risk` (Cell F — canonical version)
-- Bug 1 fixed: dict→string guard ใน @tool wrapper
+- Input: `{ticker: amount}` — tool คำนวณ weights เอง
+- Metrics: Annualized Return/Volatility, Sharpe, Sortino, Calmar, VaR 95%, CVaR 95%, Max Drawdown, Ulcer Index, Drawdown Duration, Rolling Correlation (60d), Benchmark Alpha/Beta vs SPY
+- Tools: `analyze_portfolio_risk` (Cell F — canonical)
 
 ### UC-2b: ติดตาม portfolio หลังซื้อ ✅
 - Input: `portfolio_id` string → load จาก SQLite
@@ -71,8 +94,8 @@ FastAPI (4 endpoints) + ngrok tunnel
 - Tools: `track_portfolio`
 
 ### UC-news: ข่าว + analyst commentary ✅
-- Tools: `search_market_news` → Gemini 2.5-flash + Google Search grounding
-- Routing: 10/12 ผ่าน (ดู Known limitations)
+- Tools: `search_market_news` → OpenAI gpt-4o-mini (Gemini free tier 20 req/day หมดเร็ว)
+- Routing: 10/11 ผ่าน (ดู Known limitations)
 
 ---
 
@@ -100,37 +123,39 @@ SQLAlchemy async models — swap PostgreSQL ได้โดยเปลี่ย
 
 ---
 
-## Notebook structure (สถานะจริงใน v3)
+## Notebook structure (v1.5 target)
 
 ```
-Cell 1:   Imports + _get_secret() helper (Colab Secrets / .env fallback) — ไม่มี !pip แล้ว
-Cell 2:   LangSmith client + tracer + assert gate
-Cell 3:   Tools — price, financials, hurst+IC (merged)
-Cell 5:   analyze_portfolio_risk weights-based ← DEPRECATED ⚠️ (header marked)
-Cell 6:   get_ic_score ← DEPRECATED ⚠️ (IC merged เข้า Cell 3)
-Cell 9:   Gate check Gemini quota (non-fatal try/except)
-Cell 10:  search_market_news (Gemini + grounding)
-Cell 11:  track_portfolio (SQLite via _load_positions_async)
-Cell 13:  Agent setup (Cell 7) — ChatGroq + tools list + SYSTEM_PROMPT
-Cell 15:  run_financial_agent (Cell 8) — @traceable entry point
+Cell 1:    Imports + _get_secret() helper (Colab Secrets / .env fallback)
+Cell 2:    LangSmith client + tracer + assert gate  🛑 ไม่ผ่าน = หยุด
+Cell 3:    Tools — price, financials, hurst+IC+IR (merged)
+Cell 3.5:  DataProvider Protocol + YFinanceProvider  ← ใหม่ v1.5
+Cell 4:    ⚠️ DEPRECATED — analyze_portfolio_risk weights-based (Cell F คือ canonical)
+           (get_ic_score DEPRECATED — inline comment ใน Cell 3, IC+IR merged แล้ว)
+Gate:      Gate check ก่อน Cell 5 — Gemini quota (non-fatal try/except)
+Cell 5:    search_market_news (OpenAI gpt-4o-mini fallback)
+Cell 6:    track_portfolio (SQLite via _load_positions_async)
+Cell 13:   Agent setup — ChatGroq + tools list + SYSTEM_PROMPT
+Cell 15:   run_financial_agent — @traceable entry point
 Cell 17–18: Tests UC-1
-Cell 20:  Test UC-2a
-Cell 24:  Test UC-2b
-Cell 26–29: Routing regression tests + consistency checks
-Cell 33:  Cell A — pip install sqlalchemy aiosqlite nest_asyncio (Colab only)
-Cell 34:  Cell B — SQLAlchemy models + async engine (DB_PATH env-aware)
-Cell 35:  Cell C — Seed MOCK_PORTFOLIOS เข้า DB
-Cell 36:  Cell D — _load_positions_async() ← swap MOCK → SQLite
-Cell 37:  Cell F — analyze_portfolio_risk amount-based ← CANONICAL (Bug 1+2 fixed)
-Cell 40:  Cell G — FastAPI app (4 endpoints)
-Cell 41:  Cell H — Test endpoints
+Cell 20:   Test UC-2a
+Cell 24:   Test UC-2b
+Cell 26–29: Routing regression tests (11 cases) + consistency checks
+Cell A:    pip install sqlalchemy aiosqlite nest_asyncio (Colab only)
+Cell B:    SQLAlchemy models + async engine
+Cell C:    Seed MOCK_PORTFOLIOS เข้า DB
+Cell D:    _load_positions_async()
+Cell F:    analyze_portfolio_risk amount-based ← CANONICAL (v1.5: เพิ่ม Ulcer/DrawdownDur/RollingCorr/Alpha-Beta)
+Cell G:    FastAPI app (4 endpoints) ← ต้องแก้ port conflict bug
+Cell H:    Test endpoints ← ต้องแก้ port conflict bug
 ```
 
-**กฎการรัน:** รันจากบนลงล่าง ถ้า Cell 2 ไม่ผ่านห้ามรันต่อ
+**กฎการรัน:** รันจากบนลงล่างเสมอ ถ้า Cell 2 ไม่ผ่านห้ามรันต่อ
+**หลัง refactor:** Runtime → Restart → Run all ต้องผ่านครบก่อน push
 
 ---
 
-## Tools (สถานะจริง)
+## Tools (สถานะจริง v1.5)
 
 ### get_stock_price ✅
 ```python
@@ -147,7 +172,7 @@ Output: price, change%, 52W range, P/E TTM + Forward, market cap, position in 52
 ```
 Output: revenue, net income, profit margin, revenue growth YoY, EPS, D/E
 
-### get_hurst_exponent ✅
+### get_hurst_exponent ✅ (v1.5 complete)
 ```python
 @traceable(name="calc_hurst_exponent", run_type="tool",
            tags=["quant", "regime-detection"], client=ls_client)
@@ -155,37 +180,45 @@ Output: revenue, net income, profit margin, revenue growth YoY, EPS, D/E
 R/S analysis, lags 2–20, 1Y daily log returns
 H > 0.55 → Trending | H < 0.45 → Mean-Reverting | else → Random Walk
 
-### get_hurst_exponent ✅ (IC merged — Bug 4 fixed)
-IC Score (Spearman corr rolling Hurst 20d → fwd return 5d) ถูก merge เข้า `_calc_hurst_logic` output แล้ว
-NVDA result: IC=-0.1065 (p=0.112) — strong magnitude แต่ contrarian, p ยังไม่ significant
-Cell 6 (`get_ic_score` standalone) marked DEPRECATED
+**Output includes (v1.5):**
+- IC Score = Spearman(rolling Hurst 20d, fwd return 5d) — quality: Strong/Usable/Weak
+- IR = mean(IC_monthly) / std(IC_monthly) — consistency: IR > 0.5 usable, > 1.0 strong
+- Rolling Hurst (window=126d, step=5d): early → recent trend (↗ Rising / ↘ Falling)
+- Graceful: ทุก metric มี try/except — ถ้า data ไม่พอ → skip ไม่ fail
 
 ### analyze_portfolio_risk ✅ — Cell F เป็น canonical
 ```python
 @traceable(name="portfolio_risk_analysis", run_type="tool",
            tags=["quant", "risk"], client=ls_client)
 ```
-Input: `{ticker: amount}` — tool normalize → weights เอง (`total_amount = sum(raw.values())`)
-Metrics: Annualized Return/Volatility, Sharpe, Sortino, **Calmar**, VaR 95%, CVaR 95%, Max Drawdown, per-ticker vol, correlation matrix
-Bug 1 fixed: `@tool` wrapper ทำ `json.dumps(portfolio)` ถ้า input เป็น dict
-Bug 2 fixed: Calmar merged เข้า return block แล้ว — `_portfolio_risk_logic_patch` ลบออก
+Input: `{ticker: amount}` — normalize → weights เอง (`total_amount = sum(raw.values())`)
+
+**Metrics (v1.5 — all implemented in Cell F):**
+- Annualized Return/Volatility, Sharpe, Sortino, Calmar
+- VaR 95%, CVaR 95%, Max Drawdown
+- Ulcer Index = `sqrt(mean(drawdown²))` — pain metric รวม severity + duration
+- Drawdown Duration: median + max days ต่ำกว่า peak
+- Per-ticker Annualized Volatility
+- Pearson Correlation Matrix (1Y static)
+- Rolling Correlation (last 60d) — จับ tail dependency ที่ static Pearson มองไม่เห็น
+- Alpha (annualized, vs SPY) + Beta vs SPY — CAPM market-model
 
 ### search_market_news ✅
 ```python
 @traceable(name="search_market_news", run_type="tool",
-           tags=["search", "news", "gemini"], client=ls_client)
+           tags=["search", "news", "openai"], client=ls_client)
 ```
-Model แยก: `_news_model = ChatGoogleGenerativeAI(...).bind(tools=[{"google_search": {}}])`
-ห้ามใส่ `response_schema` คู่กัน → grounding_chunks จะว่าง
-Graceful error: quota 429 → คืน error string ไม่ทำ agent พัง
+Model แยก: `_news_model = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)`
+Gemini free tier = 20 req/day หมดเร็ว → switched to OpenAI fallback ใน dev
+Graceful error: API failure → คืน error string ไม่ทำ agent พัง
 
 ### track_portfolio ✅
 ```python
 @traceable(name="track_portfolio", run_type="tool",
            tags=["portfolio", "tracking"], client=ls_client)
 ```
-`_load_positions_async()` (Cell D) แทน MOCK_PORTFOLIOS แล้ว
-Batch fetch 5d, graceful สำหรับ delisted ticker — ไม่ fail ทั้งพอร์ต
+`_load_positions_async()` (Cell D) โหลดจาก SQLite
+Batch fetch 5d, graceful สำหรับ delisted ticker
 
 ---
 
@@ -197,7 +230,7 @@ def tool_name(input: str) -> str:
     """USE THIS TOOL when... Do NOT call this for..."""
     return _tool_logic(input)
 
-@traceable(                    # LangSmith trace
+@traceable(
     name="descriptive_action", # convention: verb + noun, ไม่ใช่ชื่อ function
     run_type="tool",
     tags=["category", "source"],
@@ -212,49 +245,50 @@ def _tool_logic(input: str) -> str: ...
 
 ## Known bugs
 
-### ✅ Bug 1: BadRequestError — model ส่ง dict แทน JSON string (Fixed)
+### ✅ Bug 1: BadRequestError — dict→JSON string (Fixed)
+Fix: `@tool` wrapper ทำ `json.dumps(portfolio)` ถ้า input เป็น dict
 
-Root cause: Groq schema validation reject ก่อนถึง function แม้ `_portfolio_risk_logic` มี dict guard แล้ว
+### ✅ Bug 2: Calmar Ratio (Fixed — merged เข้า Cell F)
+`calmar = ann_return / abs(max_dd) if max_dd != 0 else float("nan")`
 
-Fix applied (Cell F — `analyze_portfolio_risk` @tool wrapper):
+### ✅ Bug 3: Cell 5 smoke test (Fixed — marked DEPRECATED)
+
+### ✅ Bug 4: get_ic_score standalone (Fixed — IC merged เข้า get_hurst_exponent)
+
+### 🔴 Bug 5: FastAPI 404 — port conflict (BLOCKING — ยังไม่แก้)
+
+Root cause: Cell G รัน `app = FastAPI()` + uvicorn ซ้ำ → OSError 10048 (port 8000 in use)
+Cell H test ล้มเหลว: `/health` → 404, `/analyze/stock` → 404
+
+**วิธีแก้ที่ถูกต้อง:**
 ```python
-if not isinstance(portfolio, str):
-    portfolio = json.dumps(portfolio)
+# Cell G ต้องเช็คก่อนว่า server กำลังรันอยู่ไหม
+import socket
+def _port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
+
+if not _port_in_use(8000):
+    # start server + ngrok
+else:
+    print("⚠️ Port 8000 already in use — reusing existing server")
+    # set PUBLIC_URL จาก ngrok tunnels ที่มีอยู่แล้ว
+    tunnels = ngrok.get_tunnels()
+    PUBLIC_URL = tunnels[0].public_url if tunnels else None
 ```
-เสริม docstring ระบุ `Input MUST be a JSON string — NOT a JSON object.`
+
+ถ้า endpoint ยัง 404 หลังแก้ port: ปัญหาคือ FastAPI app instance ที่ serve อยู่ไม่ใช่ instance เดียวกับที่ define routes → **Kernel Restart → Run all** เท่านั้น
 
 ---
 
-### ✅ Bug 2: Calmar Ratio — Fixed (merged into Cell F)
+## Known limitations
 
-`_portfolio_risk_logic_patch` ลบออกแล้ว — Calmar merge เข้า `_portfolio_risk_logic` (Cell F):
-```python
-calmar = ann_return / abs(max_dd) if max_dd != 0 else float("nan")
-calmar_str = f"{calmar:.2f}" if calmar == calmar else "N/A"
-```
-QuantaAlpha reference: Calmar=3.48 (ARR=27.75%, MDD=7.98%) → rule of thumb > 1.0 = acceptable
-
----
-
-### ✅ Bug 3: Smoke test Cell 5 — Fixed (marked deprecated)
-
-Cell 5 (legacy `analyze_portfolio_risk`) marked DEPRECATED — Cell F เป็น canonical
-
----
-
-### ✅ Bug 4: get_ic_score — Fixed (IC merged into get_hurst_exponent, Option A)
-
-IC calculation (Spearman corr rolling Hurst 20d → fwd return 5d) ถูก merge เข้า `_calc_hurst_logic` output แล้ว
-Cell 6 (`get_ic_score` standalone) marked DEPRECATED — ไม่ต้องมี tool แยก
-
----
-
-### ⚪ Known limitation: Routing case 5
+### ⚪ Routing case 5: P/E + margin over-fetches get_stock_price
 
 Query: "P/E กับ profit margin ของ AMD"
 Expected: `{get_stock_financials}` | Actual: `{get_stock_financials, get_stock_price}` — 5/5 ครั้ง
-Root cause: P/E ผูกกับราคาเชิงความหมาย
-Decision: ไม่แก้ใน v1 — benign, v2 ใช้ StateGraph conditional routing
+Root cause: P/E ผูกกับราคาเชิงความหมาย — docstring-level negative routing งัดไม่ขึ้น
+Decision: ไม่แก้ใน v1 — benign (price tool เร็ว/ถูกสุด), v2 ใช้ StateGraph conditional routing
 
 ---
 
@@ -277,10 +311,9 @@ call search_market_news ONLY — do not add get_stock_price unless price is expl
 Agent ควร synthesize cross-signals ไม่ใช่แค่ list ตัวเลข:
 - Price position in 52W + Hurst regime → momentum context
 - Correlation matrix → true diversification ("AMD-NVDA corr=0.89 = semiconductor block ก้อนเดียว")
-- Weight drift (UC-2b) → rebalancing signal
 - เมื่อ signals ขัดแย้ง ให้ระบุความขัดแย้งชัดๆ ไม่เลือกข้าง
 
-เพิ่มได้ใน system prompt แต่ต้อง regression test 12 cases ทุกครั้ง
+เพิ่มได้ใน system prompt แต่ต้อง regression test 11 cases ทุกครั้งหลังแก้
 
 ---
 
@@ -318,57 +351,82 @@ Trace URL:
 
 ```
 GET  /health
-POST /analyze/stock     → {query, response, ticker, trace_id}
-POST /analyze/portfolio → {portfolio, query, response, trace_id}
-                          Body: {"portfolio": {"NVDA": 5000, "AMD": 3000}}
+POST /analyze/stock       → {query, response, ticker, trace_id}
+POST /analyze/portfolio   → {portfolio, query, response, trace_id}
+                            Body: {"portfolio": {"NVDA": 5000, "AMD": 3000}}
 POST /portfolio/positions → {portfolio_id, name, positions_saved}
-GET  /portfolio/{id}   → {portfolio_id, response, trace_id}
+GET  /portfolio/{id}      → {portfolio_id, response, trace_id}
 ```
 
 `trace_id` = `run_id` จาก `run_financial_agent` — 1:1 กับ LangSmith
+
+**สถานะ:** endpoints define แล้วใน Cell G แต่ยังมี port conflict bug (Bug 5) ทำให้ test ใน Cell H ล้มเหลว
 
 ---
 
 ## QuantaAlpha integration (arXiv 2602.07085)
 
-เอา concept ไม่ใช่ codebase (architecture ต่างกัน — เขา: Qlib + evolutionary loop)
+เอา concept ไม่ใช่ codebase
 
-**Calmar Ratio** → reference: benchmark Calmar=3.48, rule of thumb > 1.0 = acceptable
-**IC Score (Rank IC / Spearman)** → วัด signal quality, baseline IC=0.1501 (CSI300 weekly)
+**Calmar Ratio** → benchmark = 3.48 (ARR=27.75%, MDD=7.98%), rule of thumb > 1.0
+**IC Score (Rank IC / Spearman)** → signal quality, baseline IC=0.1501 (CSI300 weekly)
+**IR = mean(IC)/std(IC)** → consistency: > 0.5 usable, > 1.0 strong, > 2.0 exceptional
 NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p ยังไม่ significant
 
-ไม่เอา: Qlib pipeline, evolutionary loop, Next.js frontend
+ไม่เอา: Qlib pipeline, evolutionary loop, Next.js frontend, fixed factor weights (pseudo-quant ถ้าไม่มี IC validation per-factor)
 
 ---
 
-## Colab dev notes
+## Key learnings & principles
 
-- `nest_asyncio.apply()` จำเป็นสำหรับ async SQLAlchemy (Cell A)
-- ngrok ต้องการ `NGROK_TOKEN` ใน Colab Secrets
-- หลัง refactor: Runtime → Restart → Run all ต้องผ่านครบก่อน push
-- ห้าม print/commit API key หรือ trace URL
+- **LangSmith tracing:** `lru_cache` บน `get_env_var` → ใช้ explicit binding เสมอ
+- **`@tool` / `@traceable` ห้ามซ้อน** บนฟังก์ชันเดียวกัน — แยก outer/inner
+- **`traceable` naming:** verb + noun (เช่น `"fetch_stock_price"`), ไม่ใช่ชื่อ function
+- **Tool hallucination:** tool หายออกจาก `tools = [...]` → agent fabricate metrics convincingly — LangSmith trace ช่วย debug
+- **Agent routing:** docstring engineering มี limit — structural fix (StateGraph) คือทางออกที่ถูก
+- **Tool input format:** JSON string input over dict + normalize guard ใน `@tool` wrapper
+- **Database design:** เก็บเฉพาะ source-of-truth (ticker, shares, avg_cost) — derive ทุกอย่าง on-the-fly
+- **Error messages:** แยก "invalid ticker" vs "transient API failure" ไม่ให้ agent เข้าใจผิด
+- **asyncio Windows:** `try/except` กับ `loop.run_until_complete()` — ไม่ใช้ `asyncio.run()`
+- **FastAPI cell ordering:** `app = FastAPI()` ต้องอยู่ในเซลล์เดียวกับ endpoints — cell ว่างก่อน = 404
+- **Port conflicts:** duplicate uvicorn start → kernel restart เท่านั้น หรือเช็ค port ก่อน start
+- **Rolling Hurst > single Hurst:** single point บอกไม่ได้ว่า regime กำลัง shift — time-series ของ H มีประโยชน์กว่า
+- **IR สำคัญกว่า IC เดียว:** IC snapshot อาจ noise — IR วัด consistency ข้ามเวลา
+- **Factor weights ต้องมาจากข้อมูล:** hardcode weights = pseudo-quant — ต้อง learn (Lasso/ElasticNet) หรือ validate IC per-factor ก่อน
 
 ---
 
 ## Build order — สถานะจริง
 
-- [x] Tools: price, financials, hurst
+### v1 Complete ✅
+- [x] Tools: price, financials, hurst+IC
 - [x] LangSmith explicit binding
-- [x] Agent + UC-1 ✅
-- [x] analyze_portfolio_risk amount-based (Cell F) ✅ logic ถูก
-- [x] search_market_news Gemini grounding ✅
-- [x] track_portfolio SQLite ✅
-- [x] FastAPI 4 endpoints + ngrok (ยังไม่ validate ครบ)
-- [x] get_ic_score (Cell 6) — exists แต่ architecture debt
-- [x] **Fix Bug 1:** normalize dict→string ใน @tool wrapper ✅
-- [x] **Fix Bug 2:** merge Calmar เข้า Cell F ✅
-- [x] **Fix Bug 3:** Cell 5 marked deprecated ✅
-- [x] **Fix Bug 4:** IC merged เข้า get_hurst_exponent (Option A) ✅
-- [x] uv setup: `pyproject.toml` + `.venv` (Python 3.11) + kernel registered
-- [x] `.env` + `.gitignore` สำหรับ local dev
-- [x] `_get_secret()` helper — Colab Secrets / `.env` fallback (Cell 1)
-- [x] `DB_PATH` env-aware — `/content` = Colab, else `portfolio.db` local
-- [ ] Interpretation framework ใน system prompt
+- [x] Agent + UC-1
+- [x] analyze_portfolio_risk amount-based (Cell F)
+- [x] search_market_news (OpenAI gpt-4o-mini fallback — Gemini free tier quota หมดเร็ว)
+- [x] track_portfolio SQLite
+- [x] FastAPI 4 endpoints (defined — port bug pending)
+- [x] Fix Bug 1: dict→string normalize
+- [x] Fix Bug 2: Calmar merged เข้า Cell F
+- [x] Fix Bug 3: Cell 5 marked deprecated
+- [x] Fix Bug 4: IC merged เข้า get_hurst_exponent
+- [x] uv setup: pyproject.toml + .venv (Python 3.11)
+- [x] .env + .gitignore สำหรับ local dev
+- [x] _get_secret() helper — Colab Secrets / .env fallback
+- [x] DB_PATH env-aware — /content = Colab, else portfolio.db local
+- [x] Routing regression: 10/11 pass
+
+### v1.5 Complete ✅
+- [x] DataProvider Protocol + YFinanceProvider (Cell 3.5)
+- [x] Rolling Hurst (126d window, step 5d) ใน `_calc_hurst_logic`
+- [x] IR = mean(IC_monthly) / std(IC_monthly) ใน `_calc_hurst_logic`
+- [x] Rolling Correlation 60d ใน Cell F
+- [x] Ulcer Index + Drawdown Duration ใน Cell F
+- [x] Alpha/Beta vs SPY ใน Cell F
+
+### Remaining 🔄
+- [ ] **🔴 Fix Bug 5: FastAPI port conflict** — ต้องแก้ก่อน demo API ได้
+- [ ] Regression test 11 cases หลังเพิ่ม v1.5 metrics
 - [ ] Dockerfile
 - [ ] Streamlit UI
 - [ ] README + public trace link + Colab badge
@@ -377,6 +435,9 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
 
 ## Out of scope v1 → v2
 
+- Walk-forward Backtesting (ต้องการ signal definition + position sizing + transaction cost model ก่อน)
+- Hidden Markov Model / Bayesian Change Point (interpretability cost > value สำหรับ interview demo)
+- Factor engine ด้วย hardcode weights (ต้องการ IC validation per-factor ก่อน)
 - PostgreSQL + multi-user (JWT auth)
 - Custom StateGraph (conditional routing — แก้ case 5)
 - Monte Carlo VaR

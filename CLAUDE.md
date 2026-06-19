@@ -255,29 +255,13 @@ Fix: `@tool` wrapper ทำ `json.dumps(portfolio)` ถ้า input เป็น
 
 ### ✅ Bug 4: get_ic_score standalone (Fixed — IC merged เข้า get_hurst_exponent)
 
-### 🔴 Bug 5: FastAPI 404 — port conflict (BLOCKING — ยังไม่แก้)
+### ⚪ Bug 5: FastAPI 404 — port conflict (DEPRIORITIZED — จะ fix ตอน migrate)
 
 Root cause: Cell G รัน `app = FastAPI()` + uvicorn ซ้ำ → OSError 10048 (port 8000 in use)
 Cell H test ล้มเหลว: `/health` → 404, `/analyze/stock` → 404
 
-**วิธีแก้ที่ถูกต้อง:**
-```python
-# Cell G ต้องเช็คก่อนว่า server กำลังรันอยู่ไหม
-import socket
-def _port_in_use(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('localhost', port)) == 0
-
-if not _port_in_use(8000):
-    # start server + ngrok
-else:
-    print("⚠️ Port 8000 already in use — reusing existing server")
-    # set PUBLIC_URL จาก ngrok tunnels ที่มีอยู่แล้ว
-    tunnels = ngrok.get_tunnels()
-    PUBLIC_URL = tunnels[0].public_url if tunnels else None
-```
-
-ถ้า endpoint ยัง 404 หลังแก้ port: ปัญหาคือ FastAPI app instance ที่ serve อยู่ไม่ใช่ instance เดียวกับที่ define routes → **Kernel Restart → Run all** เท่านั้น
+**Decision:** API จะเขียนใหม่ตรงใน `src/api/` — ไม่ migrate Cell G/H — Bug นี้จะหายไปเอง
+`uvicorn main:app` run ครั้งเดียว ไม่มี re-run cell → port conflict ไม่เกิดในกระบวนการ production
 
 ---
 
@@ -424,12 +408,64 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
 - [x] Ulcer Index + Drawdown Duration ใน Cell F
 - [x] Alpha/Beta vs SPY ใน Cell F
 
-### Remaining 🔄
-- [ ] **🔴 Fix Bug 5: FastAPI port conflict** — ต้องแก้ก่อน demo API ได้
+### Production Migration 🔄
+- [x] src/config.py — env loading, LangSmith client/tracer
+- [x] src/tools/price.py — get_stock_price
+- [x] src/tools/financials.py — get_stock_financials
+- [x] src/tools/hurst.py — get_hurst_exponent (v1.5: Rolling Hurst + IR + IC)
+- [ ] src/database/models.py + session.py
+- [ ] src/agent/prompts.py + core.py
+- [ ] src/api/schemas.py + routes.py (เขียนใหม่ — ไม่ migrate Cell G/H)
+- [ ] main.py + Dockerfile
+
+### Remaining (notebook) 🔄
 - [ ] Regression test 11 cases หลังเพิ่ม v1.5 metrics
+- [ ] README + public trace link + Colab badge
+- [ ] Streamlit UI
 - [ ] Dockerfile
 - [ ] Streamlit UI
 - [ ] README + public trace link + Colab badge
+
+---
+
+## Production Migration
+
+### Strategy
+- **tools / db / agent**: migrate logic ตรงๆ จาก notebook — logic เหมือนเดิม แค่เปลี่ยน import
+- **API**: เขียนใหม่ใน `src/api/` — ไม่ migrate Cell G/H (Cell G มี Colab/ngrok มาก, เขียนใหม่สะอาดกว่า)
+- **Priority**: tools → database → agent → API
+
+### What changes notebook → src/
+
+| Notebook pattern | src/ replacement |
+|---|---|
+| `_get_secret(key)` Colab/dotenv hybrid | `os.getenv(key)` via `load_dotenv()` ใน `src/config.py` |
+| `ls_client`, `tracer` (global) | `from src.config import ls_client, tracer` |
+| `nest_asyncio.apply()` | ลบออก — ไม่ต้องการนอก notebook |
+| `ngrok` tunnel | ลบออก — ใช้ reverse proxy / Railway จริง |
+| `DB_PATH = "/content/..." if Colab` | `DB_PATH = os.getenv("DB_PATH", "portfolio.db")` |
+| `!pip install ...` Cell A | อยู่ใน `pyproject.toml` แล้ว |
+
+### Target file structure
+```
+src/
+├── config.py            ✅ done
+├── tools/
+│   ├── price.py         get_stock_price
+│   ├── financials.py    get_stock_financials
+│   └── hurst.py         get_hurst_exponent (v1.5)
+├── database/
+│   ├── models.py        SQLAlchemy models
+│   └── session.py       engine, AsyncSessionLocal, init_db()
+├── agent/
+│   ├── prompts.py       SYSTEM_PROMPT
+│   └── core.py          build_agent(), run_financial_agent()
+└── api/
+    ├── schemas.py       Pydantic request/response models
+    └── routes.py        FastAPI router
+main.py                  app assembly + uvicorn entry point
+Dockerfile
+```
 
 ---
 

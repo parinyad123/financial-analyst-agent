@@ -401,6 +401,9 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
 - **Rolling Hurst > single Hurst:** single point บอกไม่ได้ว่า regime กำลัง shift — time-series ของ H มีประโยชน์กว่า
 - **IR สำคัญกว่า IC เดียว:** IC snapshot อาจ noise — IR วัด consistency ข้ามเวลา
 - **Factor weights ต้องมาจากข้อมูล:** hardcode weights = pseudo-quant — ต้อง learn (Lasso/ElasticNet) หรือ validate IC per-factor ก่อน
+- **SPY tz mismatch ทำให้ Alpha/Beta = N/A เงียบ:** `yf.download()` คืน tz-naive index, `yf.Ticker().history()` (ผ่าน DataProvider) คืน tz-aware — `DatetimeIndex.intersection()` บน mixed-tz ได้ empty set โดยไม่ error ถ้า data fetch มาจาก 2 source ต่างกัน ต้องเช็ค tz-awareness ให้ตรงกันก่อน join เสมอ
+- **Thai text "?" ใน log ≠ input เพี้ยน เสมอไป:** ทดสอบด้วย `repr(query)` ก่อนสรุปว่า input ผิด — กรณีนี้ปัญหาคือ (1) bash curl บน Windows ส่ง encoding ผิดตั้งแต่ shell (ไม่ใช่ FastAPI bug) และ (2) Windows stdout default เป็น cp1252 พิมพ์ Thai unicode ไม่ได้ (ไม่ใช่ agent logic ผิด) — แก้ด้วย `sys.stdout.reconfigure(encoding="utf-8")` ใน `main.py` เท่านั้น ไม่ต้องแก้ agent หรือ encoding ของ request — ทดสอบจริงผ่าน Swagger UI (`/docs`) เสมอ เพราะส่ง UTF-8 ถูกต้องอัตโนมัติ ไม่ผ่าน bash curl บน Windows ที่มี encoding ของ shell เองเป็นตัวแปรกวน
+- **Git Bash curl บน Windows ไม่เหมาะทดสอบ Thai API:** ส่ง Thai chars เป็น `????` ตั้งแต่ shell ก่อนถึง server เสมอ ทำให้ routing test ดู "ผิด" ทั้งที่ server ทำงานถูก (เคยทำให้เข้าใจผิดว่า news routing regress) — ทดสอบ Thai query ผ่าน **Swagger UI** หรือ **PowerShell `Invoke-RestMethod`** หรือ **Python `urllib`/`requests`** เท่านั้น ไม่ใช้ bash curl บน Windows
 
 ---
 
@@ -437,19 +440,24 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
 - [x] src/tools/price.py — get_stock_price
 - [x] src/tools/financials.py — get_stock_financials
 - [x] src/tools/hurst.py — get_hurst_exponent (v1.5: Rolling Hurst + IR + IC)
-- [ ] src/tools/portfolio_risk.py — analyze_portfolio_risk (v1.5 metrics)
-- [ ] src/tools/news.py — search_market_news
-- [ ] src/tools/portfolio_track.py — track_portfolio
-- [ ] src/database/models.py + session.py
-- [ ] src/agent/prompts.py + core.py
-- [ ] src/api/schemas.py + routes.py (implement ตาม "FastAPI Target Spec" — fresh code ไม่มี legacy bug)
-- [ ] main.py + Dockerfile
+- [x] src/tools/portfolio_risk.py — analyze_portfolio_risk (v1.5 metrics complete + tz mismatch bug fixed)
+- [x] src/tools/news.py — search_market_news
+- [x] src/tools/portfolio_track.py — track_portfolio
+- [x] src/database/models.py + session.py
+- [x] src/agent/prompts.py + core.py
+- [x] src/api/schemas.py + routes.py
+- [x] main.py — app assembly + uvicorn entry point + UTF-8 stdout reconfigure
+- [x] End-to-end test ทั้ง 4 endpoints ผ่าน Swagger UI — verified ด้วย response จริง (Alpha/Beta ไม่ N/A, Thai text ถูกต้อง)
+- [x] UC-news (search_market_news) verified — citation annotations จริงจาก web_search_preview, ไม่ hallucinate
+- [x] Routing case 5 verified — behavior เหมือนเดิม ไม่ regress
+- [x] Error handling (invalid/delisted ticker) verified — แยก "invalid ticker" vs "transient API failure" ถูกต้อง, ไม่ throw 500
+- [x] Dockerfile — multi-stage build (uv + python:3.11-slim), build+run+test ผ่านจริงใน container
+  (health check 200, agent+LangSmith ทำงานจริง, trace_id เป็น UUID7 จริง, Thai encoding ถูกต้องบน Linux base)
 
 ### Remaining
 - [ ] Regression test 11 cases หลังเพิ่ม v1.5 metrics
 - [ ] README + public trace link + Colab badge
 - [ ] Streamlit UI
-- [ ] Dockerfile
 
 ---
 

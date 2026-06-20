@@ -1,9 +1,14 @@
 import os
 from dotenv import load_dotenv
+
+# load_dotenv() ต้องอยู่ก่อน langsmith import ทุกตัว —
+# lru_cache ของ langsmith.utils.get_env_var cache ค่า env ตอน import ครั้งแรก
+# ถ้า import langsmith ก่อน load_dotenv() ค่าจาก .env จะไม่ถูกเห็น
+load_dotenv()
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+
 from langsmith import Client
 from langchain_core.tracers import LangChainTracer
-
-load_dotenv()
 
 PROJECT_NAME = "financial-analyst-agent"
 
@@ -17,6 +22,8 @@ if not _groq_key:
     raise EnvironmentError("GROQ_API_KEY not set — add it to .env")
 
 GROQ_API_KEY = _groq_key
+
+DB_PATH = os.environ.get("DB_PATH", "portfolio.db")
 
 ls_client = Client(
     api_key=_langchain_key,

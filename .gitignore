@@ -3,4 +3,6 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-notebooks/portfolio.db
+# SQLite — persisted via Docker volume at runtime
+portfolio.db
+data/

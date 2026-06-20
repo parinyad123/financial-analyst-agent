@@ -1,0 +1,27 @@
+# Python artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Dev / notebook
+notebooks/
+*.ipynb
+.claude/
+
+# Secrets — never bake into image
+.env
+
+# Version control
+.git/
+.gitignore
+
+# Local data (SQLite mounts as volume at runtime)
+portfolio.db
+data/
+
+# Docs
+README.md
+CLAUDE.md

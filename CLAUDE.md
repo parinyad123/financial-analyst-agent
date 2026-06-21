@@ -455,9 +455,14 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
   (health check 200, agent+LangSmith ทำงานจริง, trace_id เป็น UUID7 จริง, Thai encoding ถูกต้องบน Linux base)
 
 ### Remaining
-- [ ] Regression test 11 cases หลังเพิ่ม v1.5 metrics
+- [x] Regression test 11 cases หลังเพิ่ม v1.5 metrics — `tests/test_routing_regression.py`,
+  10/11 passed (case 5 known limitation, deterministic over-fetch ยืนยันด้วย 5x consistency check)
 - [ ] README + public trace link + Colab badge
 - [ ] Streamlit UI
+
+### Backlog (non-blocking)
+- [ ] `create_react_agent` deprecation warning (LangGraph v1.0 moved to `langchain.agents`) —
+  `src/agent/core.py:37` — fix แล้วต้องรัน `tests/test_routing_regression.py` ซ้ำก่อน merge
 
 ---
 
@@ -502,7 +507,46 @@ src/
     └── routes.py        FastAPI router — implement ตาม "FastAPI Target Spec"
 main.py                  app assembly + uvicorn entry point
 Dockerfile
+tests/
+└── test_routing_regression.py   ✅ done — 11 cases, mirrors notebook Cell 26-29
 ```
+
+---
+
+## Streamlit UI — design decisions (ก่อน implement)
+
+**Architecture:** เรียกผ่าน FastAPI ที่มีอยู่ (HTTP request → `localhost:8000`) — ไม่เรียก agent ตรงจาก Streamlit เพื่อให้ FastAPI ยังเป็น single source of truth ของ business logic
+
+**3 sections:**
+
+| Section | Endpoint | Fields |
+|---|---|---|
+| Chat-style (ถามทั่วไป) | `POST /analyze/stock` | query เดียว (free text) |
+| Portfolio Risk (what-if) | `POST /analyze/portfolio` | ticker + **จำนวนเงิน** (ไม่ใช่จำนวนหุ้น) + query เสริม (ไม่บังคับ) |
+| Portfolio Tracking | `POST /portfolio/positions` + `GET /portfolio/{id}` | ticker + จำนวนหุ้น + ราคาเฉลี่ยที่ซื้อ |
+
+**Why Portfolio Risk ไม่ต้องมีจำนวนหุ้น:** `analyze_portfolio_risk` คำนวณจาก weight (`amount / total_amount`) ไม่ใช่จำนวนหุ้นจริง — เป็น what-if ก่อนซื้อ ไม่ใช่ของที่ถือแล้ว ต่างจาก Portfolio Tracking ที่ต้องมี `shares` + `avg_cost` จริงเพราะคำนวณ unrealized P&L จากต้นทุนจริง
+
+### Scope ที่ไม่รองรับ (ป้องกัน scope creep ที่ UI layer)
+
+ระบบ**ไม่มี** what-if scenario engine หรือ cross-asset causal analysis — คำถามแบบนี้จะถูกป้องกันด้วย **helper text ที่ UI** (ไม่ใช่ agent classify เอง เพราะเพิ่ม LLM call ที่ไม่ predictable และไม่ประหยัด token จริง):
+
+- ❌ "ถ้าราคา AMD ตก 20% ความเสี่ยงพอร์ตจะเป็นไง" — ไม่มี stress test module (เป็น v2 backlog: correlation-based stress test)
+- ❌ "ถ้า Intel ฟื้นตัวจะกระทบพอร์ตยังไง" — ไม่มี causal cross-asset model (out of scope เพราะ false-precision risk เดียวกับ factor engine)
+- ✅ "เน้นอธิบายเรื่อง correlation/drawdown" — ได้ เพราะเป็นการตีความข้อมูลที่ tool คำนวณอยู่แล้ว ไม่ต้องคำนวณใหม่
+
+**No conversation memory ข้าม turn** — แต่ละ query ต้อง self-contained (พิมพ์ ticker ครบทุกครั้ง, ห้ามอ้าง "ตัวที่ถามไปแล้ว") เพราะ `run_financial_agent()` เป็น stateless และ DB ไม่เก็บ conversation history Streamlit อาจเก็บ history ไว้แสดงผลใน `st.session_state` แต่**ไม่ส่งกลับเข้า agent**
+
+### UX สำหรับ user ที่ไม่รู้ศัพท์การเงิน
+
+1. **Quick-question buttons** แทนกล่อง text เปล่า ลด barrier ตอนเริ่มถาม (เนื้อหาข้อความ — ดูตัวอย่างที่ตกลงไว้แล้วในการสนทนาออกแบบ ก่อน implement)
+2. **Two-tier display**: สรุปภาษาง่าย (ดึงจาก paragraph สุดท้ายของ agent response) แสดงเด่น, ตัวเลขเทคนิค (Sharpe, Calmar, Ulcer Index ฯลฯ) เก็บใน `st.expander` ที่พับได้ — ไม่ต้องแก้ agent/system prompt เพราะ response มีทั้งสองส่วนอยู่แล้วในตัว งานคือ parse/split ฝั่ง UI เท่านั้น
+
+### v2 backlog ที่เกิดจาก design discussion นี้
+
+- **Correlation-based stress test** — รับ shock input เช่น `{"AMD": -0.20}` ใช้ correlation matrix + volatility ที่มีอยู่แล้วประมาณผลกระทบแบบ linear (ไม่ใช่ Monte Carlo) ต้องระบุขอบเขตความแม่นยำชัดในผลลัพธ์ (เป็น linear approximation จาก correlation ในอดีต ไม่ใช่การพยากรณ์ — correlation breakdown ตอนตลาดเครียดจริงเป็นความเสี่ยงที่ต้องบอกตรงๆ)
+- **What-if เพิ่ม asset นอกพอร์ต** (เช่นเพิ่ม INTC เป็น hypothetical position) — ได้แค่ correlation/diversification effect เชิงตัวเลข ไม่ใช่ causal impact จากข่าว
+- **Conversation memory ข้าม turn** — ต้องเพิ่ม `ConversationTurn` table (`session_id`, `role`, `content`, `trace_id`) + pass message history เข้า `run_financial_agent()` แทนสร้าง `[HumanMessage(...)]` ใหม่ทุกครั้ง
 
 ---
 
@@ -511,6 +555,7 @@ Dockerfile
 - Walk-forward Backtesting (ต้องการ signal definition + position sizing + transaction cost model ก่อน)
 - Hidden Markov Model / Bayesian Change Point (interpretability cost > value สำหรับ interview demo)
 - Factor engine ด้วย hardcode weights (ต้องการ IC validation per-factor ก่อน)
+- Causal cross-asset impact analysis (เช่น "ข่าว X กระทบพอร์ต Y เท่าไหร่") — false-precision risk เดียวกับ factor engine
 - PostgreSQL + multi-user (JWT auth)
 - Custom StateGraph (conditional routing — แก้ case 5)
 - Monte Carlo VaR

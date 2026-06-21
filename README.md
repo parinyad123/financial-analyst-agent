@@ -2,9 +2,9 @@
 
 > Physics-informed quantitative financial analysis powered by a ReAct agent — combining Hurst exponent regime detection, signal-quality validation (IC/IR), and classic risk analytics with LLM reasoning. Built as both a portfolio project and a usable analysis tool.
 
-[![LangSmith Trace](https://img.shields.io/badge/LangSmith-View%20Trace-1C3C3C?logo=langchain)](#observability)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue)](#tech-stack)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker)](#running-with-docker)
+[![Tests](https://img.shields.io/badge/routing%20tests-10%2F11%20passing-brightgreen)](#running-tests)
 
 ---
 
@@ -90,7 +90,11 @@ All tool calls are traced end-to-end in LangSmith. Every numeric claim in an age
 
 Every agent run returns a `trace_id` (the LangSmith `run_id`), giving 1:1 traceability between an API response and its full execution trace — tool calls, intermediate reasoning, and timing.
 
-> Public trace links require a LangSmith `share_run()` call per trace and are not committed to the repo (they embed a workspace ID). Run the agent locally and check the `trace_id` field in any response, or see the project owner for example traces.
+```json
+{"response": "...", "trace_id": "019ee376-8c81-7d53-9233-f594b7955858"}
+```
+
+**Note on public trace links:** LangSmith's `share_run()` generates a public URL, but these expire after a limited window — a link committed to this README today would be a dead 404 within weeks. Rather than maintain a stale link, the project demonstrates observability via the `trace_id` returned on every request: run the agent locally (or via the live container) and `trace_id` will be a real, freshly-generated LangSmith run that can be shared on demand with `ls_client.share_run(run_id)`.
 
 ---
 
@@ -160,6 +164,16 @@ Walk-forward backtesting requires a full signal-to-execution pipeline (position 
 
 ---
 
+### Running tests
+
+```bash
+uv run python -m pytest tests/test_routing_regression.py -s -v
+```
+
+11 routing regression cases verify that the agent calls the correct tool(s) for a given query — covering under-trigger guards (news queries that must call `search_market_news`), over-trigger guards (numeric queries that must *not* trigger news), multi-tool co-triggering, and exact-match regression for the original single-stock use case. 10/11 pass; the one expected failure is a [documented known limitation](#design-decisions) (P/E queries also fetch live price — benign, and verified deterministic across 5 repeated runs).
+
+---
+
 ## Project structure
 
 ```
@@ -167,15 +181,18 @@ src/
 ├── config.py              # env loading, LangSmith client/tracer (explicit binding)
 ├── tools/
 │   ├── data_provider.py   # DataProvider protocol + YFinanceProvider
-│   ├── price.py / financials.py / hurst.py
-│   ├── portfolio_risk.py / portfolio_track.py
-│   └── news.py
+│   ├── price.py           # get_stock_price
+│   ├── financials.py      # get_stock_financials
+│   ├── hurst.py           # get_hurst_exponent (Rolling Hurst + IC + IR)
+│   ├── portfolio_risk.py  # analyze_portfolio_risk
+│   ├── portfolio_track.py # track_portfolio
+│   └── news.py            # search_market_news
 ├── database/
 │   ├── models.py          # Portfolio, Position (SQLAlchemy)
 │   └── session.py
 ├── agent/
 │   ├── prompts.py         # system prompt
-│   └── core.py             # build_agent(), run_financial_agent()
+│   └── core.py             # agent build + run_financial_agent()
 └── api/
     ├── schemas.py
     └── routes.py

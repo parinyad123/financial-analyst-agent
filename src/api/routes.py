@@ -47,7 +47,8 @@ async def analyze_stock(req: StockAnalysisRequest):
 @router.post("/analyze/portfolio", response_model=PortfolioAnalysisResponse)
 async def analyze_portfolio(req: PortfolioAnalysisRequest):
     portfolio_upper = {t.upper(): v for t, v in req.portfolio.items()}
-    query = req.query or f"วิเคราะห์ risk ของ portfolio: {json.dumps(portfolio_upper)}"
+    portfolio_context = f"วิเคราะห์ risk ของ portfolio: {json.dumps(portfolio_upper)}"
+    query = f"{portfolio_context}\n{req.query}" if req.query else portfolio_context
     result = await asyncio.to_thread(
         run_financial_agent,
         query,

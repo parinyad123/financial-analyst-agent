@@ -109,7 +109,7 @@ with tab1:
     st.subheader("ถามเรื่องหุ้นรายตัว")
 
     ticker1 = st.text_input(
-        "Ticker — สำหรับปุ่มด่วนด้านล่าง (ถ้าพิมพ์คำถามเองให้ใส่ ticker ในข้อความด้วย)",
+        "Ticker",
         placeholder="เช่น NVDA, TSLA, AMD",
         key="tab1_ticker",
     ).strip().upper()
@@ -143,19 +143,23 @@ with tab1:
     )
 
     st.caption(
-        "ℹ️ แต่ละคำถามต้อง self-contained — "
-        "agent ไม่จำคำถามก่อนหน้า กรุณาระบุ ticker ทุกครั้ง"
+        "ℹ️ กรอก Ticker แล้วกดปุ่มด่วน หรือพิมพ์คำถามเองได้เลย — "
+        "agent ไม่จำคำถามก่อนหน้า"
     )
 
     if st.button("วิเคราะห์", type="primary", key="tab1_submit"):
         if not query1.strip():
             st.warning("กรุณากรอกคำถามหรือกดปุ่มด่วนด้านบน")
         else:
+            # inject ticker into query if user filled the field but query doesn't mention it
+            effective_query = query1
+            if ticker1 and ticker1 not in query1.upper():
+                effective_query = f"[Ticker: {ticker1}] {query1}"
             with st.spinner("กำลังวิเคราะห์ (อาจใช้เวลา 30–60 วินาที)..."):
                 data = _call(
                     "POST",
                     "/analyze/stock",
-                    json={"query": query1, "ticker": ticker1 or None},
+                    json={"query": effective_query, "ticker": ticker1 or None},
                 )
             _show_result(data)
 

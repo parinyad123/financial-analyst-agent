@@ -35,12 +35,19 @@ def _call(method: str, path: str, **kwargs) -> dict:
 
 def _split_response(text: str) -> tuple[str, str]:
     """Return (summary, full_text).
-    Summary = last substantial paragraph — skip markdown tables and headers.
+    Summary = last chunk that is not a pure markdown table, not a bare
+    single-line header, and not a short disclaimer (< 60 chars).
+    Agent responses wrap section headers + content in one chunk (### + bullets),
+    so we only filter bare standalone headers, not header-prefixed content blocks.
     """
     chunks = [c.strip() for c in re.split(r"\n{2,}", text) if c.strip()]
     summary = ""
     for chunk in reversed(chunks):
-        if len(chunk) > 30 and not chunk.startswith("|") and not chunk.startswith("#"):
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        is_pure_table = lines and all(ln.strip().startswith("|") for ln in lines)
+        is_bare_header = len(lines) == 1 and chunk.startswith("#")
+        is_too_short = len(chunk) < 60
+        if not is_pure_table and not is_bare_header and not is_too_short:
             summary = chunk
             break
     if not summary:
@@ -102,10 +109,10 @@ with tab1:
     st.subheader("ถามเรื่องหุ้นรายตัว")
 
     ticker1 = st.text_input(
-        "Ticker (กรอกก่อนกดปุ่มด่วน)",
+        "Ticker — สำหรับปุ่มด่วนด้านล่าง (ถ้าพิมพ์คำถามเองให้ใส่ ticker ในข้อความด้วย)",
         placeholder="เช่น NVDA, TSLA, AMD",
         key="tab1_ticker",
-    ).strip().upper() or "NVDA"
+    ).strip().upper()
 
     st.write("**คำถามด่วน**")
     q1a, q1b, q1c, q1d = st.columns(4)
@@ -144,12 +151,11 @@ with tab1:
         if not query1.strip():
             st.warning("กรุณากรอกคำถามหรือกดปุ่มด่วนด้านบน")
         else:
-            ticker_in_query = ticker1 if ticker1 != "NVDA" or ticker1 in query1 else None
             with st.spinner("กำลังวิเคราะห์ (อาจใช้เวลา 30–60 วินาที)..."):
                 data = _call(
                     "POST",
                     "/analyze/stock",
-                    json={"query": query1, "ticker": ticker_in_query or None},
+                    json={"query": query1, "ticker": ticker1 or None},
                 )
             _show_result(data)
 

@@ -29,6 +29,8 @@ dependencies = [
     "ngrok>=1.4.0",
     "pyngrok>=8.1.2",
     "langchain-openai>=1.3.2",
+    "streamlit>=1.58.0",
+    "requests>=2.34.2",
 ]
 
 [project.optional-dependencies]

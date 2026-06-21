@@ -458,7 +458,7 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
 - [x] Regression test 11 cases หลังเพิ่ม v1.5 metrics — `tests/test_routing_regression.py`,
   10/11 passed (case 5 known limitation, deterministic over-fetch ยืนยันด้วย 5x consistency check)
 - [ ] README + public trace link + Colab badge
-- [ ] Streamlit UI
+- [x] Streamlit UI — `streamlit_app.py`, 3 tabs, two-tier display, quick-question buttons, error handling
 
 ### Backlog (non-blocking)
 - [ ] `create_react_agent` deprecation warning (LangGraph v1.0 moved to `langchain.agents`) —

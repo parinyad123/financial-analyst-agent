@@ -165,6 +165,22 @@ def _portfolio_risk_logic(portfolio) -> str:
         if len(tickers) >= 2 else "N/A (single asset)"
     )
 
+    # ---------- 10) Risk Contribution to Portfolio Variance ----------
+    # MCR[i] = w[i] * (Σw)[i] / (w^T Σw) — sums to 1.0 by construction
+    cov_matrix = returns.cov().values          # sample cov (ddof=1), order = data.columns
+    sigma_w    = cov_matrix @ weights          # Σw: cov of each asset with portfolio
+    port_var   = float(weights @ sigma_w)      # w^T Σw = portfolio variance (daily)
+
+    if port_var > 0:
+        risk_contrib = weights * sigma_w / port_var
+        rc_lines = "\n".join(
+            f"  {t}: {rc*100:.1f}%" for t, rc in zip(data.columns, risk_contrib)
+        )
+        rc_sum = float(sum(risk_contrib))
+        risk_contrib_str = f"{rc_lines}\n  (sanity: sum = {rc_sum*100:.4f}%)"
+    else:
+        risk_contrib_str = "N/A (zero portfolio variance)"
+
     # ---------- 9) Alpha + Beta vs SPY — CAPM market-model ----------
     # yf.download() เพื่อให้ index tz-naive ตรงกับ portfolio data (yf.Ticker().history() คืน tz-aware)
     alpha_beta_str = "N/A (SPY fetch failed)"
@@ -207,6 +223,7 @@ def _portfolio_risk_logic(portfolio) -> str:
         f"Drawdown Duration: {dd_dur_str}\n"
         f"{alpha_beta_str}\n"
         f"Per-Ticker Volatility (annualized):\n{per_vol_str}\n"
+        f"Risk Contribution to Variance (1Y):\n{risk_contrib_str}\n"
         f"Pearson Correlation Matrix (1Y):\n{corr_str}\n"
         f"{rolling_corr_str}"
     )

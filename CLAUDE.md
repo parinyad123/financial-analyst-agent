@@ -458,7 +458,7 @@ NVDA result: IC=-0.1065 (p=0.112) — magnitude strong แต่ contrarian, p �
 - [x] Regression test 11 cases หลังเพิ่ม v1.5 metrics — `tests/test_routing_regression.py`,
   10/11 passed (case 5 known limitation, deterministic over-fetch ยืนยันด้วย 5x consistency check)
 - [ ] README + public trace link + Colab badge
-- [x] Streamlit UI — `streamlit_app.py`, 3 tabs, two-tier display, quick-question buttons, error handling
+- [ ] Streamlit UI
 
 ### Backlog (non-blocking)
 - [ ] `create_react_agent` deprecation warning (LangGraph v1.0 moved to `langchain.agents`) —
@@ -510,6 +510,46 @@ Dockerfile
 tests/
 └── test_routing_regression.py   ✅ done — 11 cases, mirrors notebook Cell 26-29
 ```
+
+---
+
+## System prompt fix — UC-2a/UC-2b persona separation (✅ done)
+
+**ปัญหาที่พบ:** `analyze_portfolio_risk` (what-if, ไม่มี cost basis) พูดว่า "พอร์ตของคุณเคยขาดทุน" — misattribution เพราะ tool ไม่รู้ว่า user ถือจริงเมื่อไหร่/ราคาเท่าไหร่ และ agent เคยคำนวณ self-generated stress test (เช่น "ตลาดตก 10% × Beta 2.48 = พอร์ตตก 25%") ซึ่งเป็น false-precision — ตัวเลขไม่มาจาก tool โดยตรง
+
+**Fix:** เพิ่ม 2 กฎใหม่ใน `src/agent/prompts.py` (เขียนเป็นภาษาอังกฤษ แทรกแบบ mixed-language กับของเดิม — negative instruction ทำงานแม่นกว่าในอังกฤษสำหรับ gpt-oss-120b โดยไม่ต้องแปลทั้ง prompt และไม่เสี่ยง regression จาก language shift):
+1. UC-2a ห้ามพูด "ของคุณ"/"your portfolio lost" — ใช้ "พอร์ตสมมตินี้"/"if held during the period" เสมอ
+2. UC-2a ห้ามคำนวณ what-if scenario เอง (Beta × shock %) — รายงาน Beta/Correlation ตรงจาก tool แล้วอธิบายเชิงคุณภาพเท่านั้น
+3. UC-2b ยังใช้ "ของคุณ"/"you are up/down" ได้ปกติ — มี real cost basis รองรับ
+
+**Verified:** ทดสอบ query เดิมที่เจอ bug ผ่านครบ 3 จุด (ไม่มี "ของคุณ", ไม่มี self-generated stress number, ยังอธิบาย metrics ครบ) — รัน `tests/test_routing_regression.py` ซ้ำยืนยันไม่กระทบ routing (10/11 passed เหมือนเดิม)
+
+---
+
+## Risk Contribution Analysis — design decisions (ก่อน implement)
+
+**Why:** User ต้องการรู้ว่า "หุ้นตัวไหนในพอร์ตเป็นตัวเพิ่มความเสี่ยงมากสุด" เพื่อช่วยตัดสินใจปรับพอร์ต — ปัจจุบันมีแค่ per-ticker volatility เดี่ยวๆ ซึ่งไม่บอก contribution ต่อ **portfolio-level risk** จริง (เพราะไม่ได้คำนึง correlation/weight ร่วมกัน)
+
+**Formula (มี mathematical backing ชัดเจน — ไม่ใช่ pseudo-quant แบบ fixed factor weight ที่ปฏิเสธไปก่อนหน้า):**
+```
+marginal_contribution_to_risk[i] = weight[i] × cov(asset_i, portfolio) / portfolio_variance
+```
+ผลรวมของทุก ticker = 100% ของ portfolio variance — เป็น decomposition ที่ exact ไม่ใช่ approximation
+
+**Scope แยกตาม 2 tools (ต้องคุม wording ตาม persona separation ที่ทำไปแล้วข้างบน):**
+
+| Tool | เพิ่มอะไร | คำที่ใช้ได้ | คำที่ห้ามใช้ |
+|---|---|---|---|
+| `analyze_portfolio_risk` (UC-2a) | Risk contribution % ต่อ ticker | "AMD มี risk contribution สูงสุด — ถ้าต้องการลดความเสี่ยงรวม การลดสัดส่วนนี้คือทางหนึ่ง" | "ควรขาย AMD" (เป็น advice ตรง + พอร์ตยังไม่มีจริง) |
+| `track_portfolio` (UC-2b) | Risk contribution % + เชื่อมกับ existing unrealized P&L per position | "AMD ขาดทุน -12% และเป็นตัว contribute ความผันผวนสูงสุด — อาจพิจารณาทบทวนสัดส่วนนี้" | "ควรขาย AMD ทันที" (ยังเป็น advice ตรงเกินไป แม้มี cost basis จริง) |
+
+**Guardrail ที่ต้องเพิ่มในระบบ prompt:** ห้ามแปล risk contribution number เป็น directive คำสั่ง ("ควรขาย/ต้องขาย") — ให้รายงานตัวเลข + อธิบายความหมาย แล้วปล่อยให้ user ตัดสินใจเอง ตรงกับ constraint ที่มีอยู่แล้ว ("Do not give specific price targets, entry points, or stop-loss levels", "Note that this is not financial advice")
+
+**Build order:**
+1. เพิ่ม risk contribution calculation ใน `_portfolio_risk_logic` (Cell F / `src/tools/portfolio_risk.py`)
+2. เพิ่ม risk contribution calculation ใน `_track_portfolio_logic` (`src/tools/portfolio_track.py`)
+3. เพิ่ม guardrail wording เข้า system prompt (ห้าม advice ตรง)
+4. Regression test ซ้ำ — ต้องยัง 10/11 passed
 
 ---
 

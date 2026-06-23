@@ -1,5 +1,6 @@
 import asyncio
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from langchain_core.tools import tool
@@ -147,13 +148,46 @@ def _track_portfolio_logic(portfolio_id: str) -> str:
     total_pnl = total_mv - total_cost
     total_pnl_pct = total_pnl / total_cost * 100
 
+    # ---------- 5) Risk Contribution (1Y history, current MV weights) ----------
+    # Uses market-value weights (not cost basis) — reflects actual current exposure
+    active_tickers = [t for t in tickers if prices[t] is not None]
+    risk_contrib_str = "N/A"
+    if len(active_tickers) >= 2:
+        try:
+            hist = yf.download(active_tickers, period="1y", progress=False, auto_adjust=True)["Close"]
+            if isinstance(hist, pd.Series):
+                hist = hist.to_frame(name=active_tickers[0])
+            hist = hist[active_tickers].dropna()
+            if len(hist) >= 30:
+                hist_returns = np.log(hist / hist.shift(1)).dropna()
+                shares_map = {p["ticker"].upper(): p["shares"] for p in positions}
+                mv_active = np.array([shares_map[t] * prices[t] for t in active_tickers])
+                mv_weights = mv_active / mv_active.sum()
+                cov_matrix = hist_returns.cov().values
+                sigma_w = cov_matrix @ mv_weights
+                port_var_rc = float(mv_weights @ sigma_w)
+                if port_var_rc > 0:
+                    risk_contrib = mv_weights * sigma_w / port_var_rc
+                    rc_lines = "\n".join(
+                        f"  {t}: {rc*100:.1f}%" for t, rc in zip(active_tickers, risk_contrib)
+                    )
+                    rc_sum = float(sum(risk_contrib))
+                    risk_contrib_str = f"{rc_lines}\n  (sanity: sum = {rc_sum*100:.4f}%)"
+                else:
+                    risk_contrib_str = "N/A (zero portfolio variance)"
+        except Exception as e:
+            risk_contrib_str = f"N/A (error: {e})"
+    elif len(active_tickers) == 1:
+        risk_contrib_str = f"  {active_tickers[0]}: 100.0% (single asset)"
+
     out = (
         f"Portfolio: {pf_name} (id: {portfolio_id})\n"
         f"Positions:\n" + "\n".join(lines) + "\n"
         f"Total Market Value: ${total_mv:,.2f}\n"
         f"Total Cost Basis: ${total_cost:,.2f}\n"
         f"Total Unrealized P&L: {total_pnl:+,.2f} ({total_pnl_pct:+.1f}%)\n"
-        f"Current Weights (by market value):\n" + "\n".join(weight_lines)
+        f"Current Weights (by market value):\n" + "\n".join(weight_lines) + "\n"
+        f"Risk Contribution to Variance (1Y, MV-weighted):\n{risk_contrib_str}"
     )
     if warnings_list:
         out += "\nWarnings:\n" + "\n".join(warnings_list)

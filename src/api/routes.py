@@ -47,8 +47,23 @@ async def analyze_stock(req: StockAnalysisRequest):
 @router.post("/analyze/portfolio", response_model=PortfolioAnalysisResponse)
 async def analyze_portfolio(req: PortfolioAnalysisRequest):
     portfolio_upper = {t.upper(): v for t, v in req.portfolio.items()}
-    portfolio_context = f"วิเคราะห์ risk ของ portfolio: {json.dumps(portfolio_upper)}"
-    query = f"{portfolio_context}\n{req.query}" if req.query else portfolio_context
+    # Normalize float amounts to int where lossless — matches tool docstring examples
+    portfolio_clean = {
+        t: int(v) if float(v) == int(v) else v for t, v in portfolio_upper.items()
+    }
+    portfolio_json = json.dumps(portfolio_clean)
+    user_q = req.query.strip() if req.query else ""
+    # Single-quoted JSON matches tool docstring format; explicit label prevents
+    # the model from treating the portfolio line as background context and asking
+    # the user to re-supply data that is already present.
+    if user_q:
+        query = (
+            f"วิเคราะห์ความเสี่ยงพอร์ต\n"
+            f"Portfolio: '{portfolio_json}'\n"
+            f"คำถาม: {user_q}"
+        )
+    else:
+        query = f"วิเคราะห์ความเสี่ยงพอร์ต: '{portfolio_json}'"
     result = await asyncio.to_thread(
         run_financial_agent,
         query,

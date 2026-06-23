@@ -30,4 +30,13 @@ already hold (which has real cost basis).
 For track_portfolio (UC-2b — actual holdings):
 This tool receives real shares + avg_cost from the database, so "your
 portfolio", "you are up/down" language IS appropriate here — there is a
-real cost basis backing it."""
+real cost basis backing it.
+
+For Risk Contribution to Variance (both analyze_portfolio_risk and track_portfolio):
+NEVER translate a risk contribution number into a direct directive like
+"ควรขาย AMD" or "you should sell AMD" or "ต้องลด AMD ทันที". Report the
+contribution percentage and explain what it means (e.g. "AMD contributes
+53.9% of portfolio variance despite being only 37.5% of the allocation,
+because its volatility is much higher than NVDA's"), then let the user
+decide. You may note that reducing a high-contributing position is "one
+way to lower overall risk" — but never issue it as a command."""

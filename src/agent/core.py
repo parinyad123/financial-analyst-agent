@@ -1,3 +1,5 @@
+import logging
+import re
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage
@@ -15,6 +17,58 @@ from src.tools.news import search_market_news
 from src.tools.portfolio_risk import analyze_portfolio_risk
 from src.tools.portfolio_track import track_portfolio
 from src.tools.price import get_stock_price
+
+_logger = logging.getLogger(__name__)
+
+_STOPLOSS_KEYWORDS = frozenset([
+    "stop-loss", "stop loss", "stoploss",
+    "hedge", "hedging", "เฮดจ์",
+    "เครื่องมือป้องกัน",
+])
+
+_REFUSAL_STATEMENT = (
+    "\n\nส่วนเรื่อง stop-loss/hedging — "
+    "ฉันไม่สามารถแนะนำได้ เพราะเป็น actionable trading decision "
+    "ที่อยู่นอกขอบเขตของระบบนี้"
+)
+
+
+_UNICODE_HYPHENS = "‐‑‒–—−"  # ‐‑‒–—−
+
+
+def _normalize_hyphens(text: str) -> str:
+    for ch in _UNICODE_HYPHENS:
+        text = text.replace(ch, "-")
+    return text
+
+
+def _filter_stoploss(response: str) -> str:
+    """Deterministic safety net — remove any paragraph that mentions
+    stop-loss/hedging and replace with the fixed refusal statement.
+    Normalizes Unicode hyphen variants before matching (model outputs U+2011).
+    Logs each trigger so prompt guardrail leakage is visible in logs."""
+    normalized_full = _normalize_hyphens(response.lower())
+    if not any(kw in normalized_full for kw in _STOPLOSS_KEYWORDS):
+        return response
+
+    paragraphs = re.split(r"\n{2,}", response)
+    clean, n_removed = [], 0
+    for para in paragraphs:
+        if any(kw in _normalize_hyphens(para.lower()) for kw in _STOPLOSS_KEYWORDS):
+            n_removed += 1
+            _logger.warning(
+                "[stoploss-filter] removed paragraph | preview: %s",
+                para[:120].replace("\n", " "),
+            )
+        else:
+            clean.append(para)
+
+    _logger.warning(
+        "[stoploss-filter] prompt guardrail leaked — removed %d paragraph(s)",
+        n_removed,
+    )
+    return "\n\n".join(clean) + _REFUSAL_STATEMENT
+
 
 _tools = [
     get_stock_price,
@@ -84,6 +138,7 @@ def run_financial_agent(
             if hasattr(last, "content") and last.content:
                 final_response = last.content
 
+    final_response = _filter_stoploss(final_response)
     rt = get_current_run_tree()
     return {
         "query": query,

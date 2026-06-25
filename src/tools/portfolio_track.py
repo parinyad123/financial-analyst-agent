@@ -148,10 +148,12 @@ def _track_portfolio_logic(portfolio_id: str) -> str:
     total_pnl = total_mv - total_cost
     total_pnl_pct = total_pnl / total_cost * 100
 
-    # ---------- 5) Risk Contribution (1Y history, current MV weights) ----------
+    # ---------- 5) Risk Contribution & Correlation (1Y history, current MV weights) ----------
     # Uses market-value weights (not cost basis) — reflects actual current exposure
     active_tickers = [t for t in tickers if prices[t] is not None]
     risk_contrib_str = "N/A"
+    corr_str = "N/A"
+    rolling_corr_str = "N/A"
     if len(active_tickers) >= 2:
         try:
             hist = yf.download(active_tickers, period="1y", progress=False, auto_adjust=True)["Close"]
@@ -160,6 +162,15 @@ def _track_portfolio_logic(portfolio_id: str) -> str:
             hist = hist[active_tickers].dropna()
             if len(hist) >= 30:
                 hist_returns = np.log(hist / hist.shift(1)).dropna()
+                corr_str = (
+                    hist_returns.corr().round(2)
+                    .rename_axis(index=None, columns=None).to_string()
+                )
+                rolling_corr_str = (
+                    "Rolling Corr (last 60d):\n"
+                    + hist_returns.tail(60).corr().round(2)
+                    .rename_axis(index=None, columns=None).to_string()
+                )
                 shares_map = {p["ticker"].upper(): p["shares"] for p in positions}
                 mv_active = np.array([shares_map[t] * prices[t] for t in active_tickers])
                 mv_weights = mv_active / mv_active.sum()
@@ -179,6 +190,8 @@ def _track_portfolio_logic(portfolio_id: str) -> str:
             risk_contrib_str = f"N/A (error: {e})"
     elif len(active_tickers) == 1:
         risk_contrib_str = f"  {active_tickers[0]}: 100.0% (single asset)"
+        corr_str = "N/A (single asset)"
+        rolling_corr_str = "N/A (single asset)"
 
     out = (
         f"Portfolio: {pf_name} (id: {portfolio_id})\n"
@@ -187,7 +200,9 @@ def _track_portfolio_logic(portfolio_id: str) -> str:
         f"Total Cost Basis: ${total_cost:,.2f}\n"
         f"Total Unrealized P&L: {total_pnl:+,.2f} ({total_pnl_pct:+.1f}%)\n"
         f"Current Weights (by market value):\n" + "\n".join(weight_lines) + "\n"
-        f"Risk Contribution to Variance (1Y, MV-weighted):\n{risk_contrib_str}"
+        f"Risk Contribution to Variance (1Y, MV-weighted):\n{risk_contrib_str}\n"
+        f"Pearson Correlation Matrix (1Y):\n{corr_str}\n"
+        f"{rolling_corr_str}"
     )
     if warnings_list:
         out += "\nWarnings:\n" + "\n".join(warnings_list)

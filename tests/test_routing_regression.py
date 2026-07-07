@@ -87,10 +87,11 @@ ROUTING_TESTS = [
 # Build agent once for the whole test session (mirrors notebook agent_graph)
 _agent_graph = build_agent()
 
-# Case 5 (1-indexed) = index 4 (0-indexed): known limitation — over-fetches get_stock_price
-# P/E ผูกกับราคาเชิงความหมาย → docstring-level negative routing งัดไม่ขึ้น
-_KNOWN_CASE_1IDX = 5
-_KNOWN_EXTRA = {"get_stock_price"}
+# Case 5 (1-indexed): "P/E + profit margin" — formerly a known limitation where
+# the ReAct agent over-fetched get_stock_price. v2 StateGraph structured planning
+# fixes this structurally (planner routes fundamentals-only, executor binds only
+# planned tools). It must now pass like any other case — no exemption.
+_CASE5_1IDX = 5
 
 
 def get_called_tools(query: str, max_retries: int = 3) -> set:
@@ -117,9 +118,9 @@ def get_called_tools(query: str, max_retries: int = 3) -> set:
 def test_routing_regression():
     """Run all 11 routing cases.
 
-    Pass condition: all cases match expected EXCEPT case 5 which is a known
-    limitation (over-fetches get_stock_price — documented in CLAUDE.md).
-    Any other failure stops the suite immediately.
+    Pass condition: ALL cases match expected exactly (11/11). Case 5 (P/E +
+    margin) is no longer exempt — the v2 StateGraph planner fixes the historic
+    get_stock_price over-fetch structurally.
     """
     results = []
 
@@ -141,8 +142,6 @@ def test_routing_regression():
                 print(f"     ⚠️ EXTRA (over-trigger):    {extra}")
             if not ok:
                 print(f"     why this matters: {t['why']}")
-                if i == _KNOWN_CASE_1IDX and extra == _KNOWN_EXTRA and not missing:
-                    print("     ℹ️  Known limitation — benign over-fetch (price tool is fast/cheap)")
 
             time.sleep(2)  # guard Groq rate limit between queries
 
@@ -153,34 +152,28 @@ def test_routing_regression():
     print(f"\n{'=' * 55}")
     print(f"Routing: {passed} passed, {failed} failed / {len(ROUTING_TESTS)}")
 
-    # Collect unexpected failures — case 5 EXTRA={get_stock_price} is the only known one
-    unexpected = []
+    failures = []
     for i, t, actual, ok, missing, extra in results:
         if ok:
             continue
-        is_known_failure = (i == _KNOWN_CASE_1IDX and extra == _KNOWN_EXTRA and not missing)
-        if not is_known_failure:
-            unexpected.append(
-                f"  Case {i}: {t['query'][:55]!r}\n"
-                f"    MISSING={missing}  EXTRA={extra}\n"
-                f"    why: {t['why']}"
-            )
-
-    if unexpected:
-        pytest.fail(
-            f"Unexpected routing failures (not case {_KNOWN_CASE_1IDX} known limitation):\n"
-            + "\n".join(unexpected)
+        failures.append(
+            f"  Case {i}: {t['query'][:55]!r}\n"
+            f"    MISSING={missing}  EXTRA={extra}\n"
+            f"    why: {t['why']}"
         )
+
+    if failures:
+        pytest.fail("Routing failures:\n" + "\n".join(failures))
 
 
 def test_case5_consistency():
-    """Notebook Cell 29 — run case 5 query 5× to verify the over-fetch is consistent.
+    """Run case 5 query 5× to verify the v2 fix is deterministic.
 
-    Asserts: get_stock_financials is always called (no under-trigger regression).
-    The extra get_stock_price is the known limitation; its presence is noted but not failed.
+    Asserts (all 5 rounds): get_stock_financials is called AND get_stock_price
+    is NOT — i.e. the fundamentals-only route holds consistently, not by luck.
     """
-    query = ROUTING_TESTS[_KNOWN_CASE_1IDX - 1]["query"]  # "P/E กับ profit margin ของ AMD"
-    print(f"\nเช็ค consistency case {_KNOWN_CASE_1IDX} (P/E + margin):")
+    query = ROUTING_TESTS[_CASE5_1IDX - 1]["query"]  # "P/E กับ profit margin ของ AMD"
+    print(f"\nเช็ค consistency case {_CASE5_1IDX} (P/E + margin) — expect financials-only:")
 
     results = []
     with tracing_context(enabled=True, client=ls_client):
@@ -195,5 +188,31 @@ def test_case5_consistency():
 
     for i, r in enumerate(results, 1):
         assert "get_stock_financials" in r, (
-            f"รอบ {i}: get_stock_financials MISSING from {r} — under-trigger regression in case 5"
+            f"รอบ {i}: get_stock_financials MISSING from {r} — under-trigger regression"
         )
+        assert "get_stock_price" not in r, (
+            f"รอบ {i}: get_stock_price present in {r} — over-fetch regression (case 5 fix broke)"
+        )
+
+
+def test_stoploss_filter_triggers():
+    """Guardrail safety net must survive the StateGraph refactor — deterministic
+    post-processing filter still strips stop-loss/hedging paragraphs and appends
+    the fixed refusal. Pure string test, no LLM/network. See
+    docs/POSTMORTEMS.md#guardrails (incl. U+2011 Unicode-hyphen gotcha)."""
+    from src.agent.core import _REFUSAL_STATEMENT, _filter_stoploss
+
+    # ASCII hyphen
+    out = _filter_stoploss(
+        "AMD volatility สูงมาก\n\nคุณอาจตั้ง stop-loss เพื่อจำกัดการขาดทุน"
+    )
+    assert "volatility" in out, "non-stoploss paragraph must be kept"
+    assert "จำกัดการขาดทุน" not in out, "stop-loss paragraph must be removed"
+    assert _REFUSAL_STATEMENT.strip() in out, "fixed refusal must be appended"
+
+    # U+2011 non-breaking hyphen — must still trigger after normalization
+    assert _REFUSAL_STATEMENT.strip() in _filter_stoploss("ควรใช้ stop‑loss ไหม")
+
+    # Clean response passes through unchanged (no false positives)
+    clean = "AMD มี P/E 30 และ margin 20%"
+    assert _filter_stoploss(clean) == clean

@@ -82,6 +82,20 @@ ROUTING_TESTS = [
         "expected": {"get_stock_price", "get_stock_financials", "get_hurst_exponent"},
         "why": "UC-1 ตัวเดิมเป๊ะ — news ไม่ควรแทรกเพราะไม่ได้ขอข่าว",
     },
+    # ---- E) CASE 12/13: deterministic pre-route (_plan_override) ----
+    {
+        "query": "พอร์ต streamlit-test-001: TSLA เสี่ยงสุดไหม และควรตั้ง stop-loss ไหม",
+        "expected": {"track_portfolio"},
+        "why": "มี portfolio_id จริงใน query — risk/stop-loss phrasing เคยดึง planner "
+        "ไปทาง analyze_portfolio_risk ผิด (case 12 gap) _plan_override ต้อง force "
+        "track_portfolio ก่อน LLM planner ทำงานเลย",
+    },
+    {
+        "query": "พอร์ตแบบนี้เสี่ยงไหม NVDA 5000 AMD 3000",
+        "expected": {"analyze_portfolio_risk"},
+        "why": "counter-case กัน over-trigger — ไม่มี portfolio_id จริงใน query "
+        "(เป็น what-if ล้วน) _plan_override ต้องไม่ force เข้า track_portfolio",
+    },
 ]
 
 # Build agent once for the whole test session (mirrors notebook agent_graph)
@@ -116,11 +130,12 @@ def get_called_tools(query: str, max_retries: int = 3) -> set:
 
 
 def test_routing_regression():
-    """Run all 11 routing cases.
+    """Run all 13 routing cases.
 
-    Pass condition: ALL cases match expected exactly (11/11). Case 5 (P/E +
+    Pass condition: ALL cases match expected exactly (13/13). Case 5 (P/E +
     margin) is no longer exempt — the v2 StateGraph planner fixes the historic
-    get_stock_price over-fetch structurally.
+    get_stock_price over-fetch structurally. Cases 12/13 cover the
+    deterministic _plan_override pre-route (case 12 gap fix).
     """
     results = []
 

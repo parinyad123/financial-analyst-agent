@@ -7,7 +7,7 @@
 | LLM (dev) | Groq — `openai/gpt-oss-120b` | `reasoning_effort="low"`, tool orchestration เสถียร |
 | LLM (prod) | Gemini 2.5 Flash | swap ตอน deploy |
 | LLM (news) | OpenAI `gpt-4o-mini` | `_news_model` ใน `search_market_news` — Gemini free tier 20 req/day หมดเร็ว |
-| Agent framework | LangGraph `create_react_agent` | prebuilt ReAct |
+| Agent framework | LangGraph custom `StateGraph` (planner → agent → tools) | replaces deprecated `create_react_agent` — ดู `#agent-framework` |
 | Market data | yfinance (via `YFinanceProvider`) | real-time price, fundamentals, history |
 | Observability | LangSmith | **explicit binding — ไม่พึ่ง env vars** |
 | Backend | FastAPI + Pydantic v2 | async endpoints + ngrok สำหรับ local dev |
@@ -30,20 +30,104 @@ User query
     ↓
 run_financial_agent() @traceable → return trace_id (run_id)
     ↓
-ReAct Agent (LangGraph + gpt-oss-120b)
-    ├── get_stock_price            → YFinanceProvider → 5d history
-    ├── get_stock_financials       → YFinanceProvider → .info
-    ├── get_hurst_exponent         → YFinanceProvider 1Y + numpy R/S + Rolling Hurst + IC + IR
-    ├── analyze_portfolio_risk     → YFinanceProvider 1Y + numpy/pandas (amount-based) + Risk Contribution
-    ├── track_portfolio            → SQLite + YFinanceProvider 5d + Risk Contribution
-    └── search_market_news         → OpenAI gpt-4o-mini (Gemini quota: 20 req/day)
-        ↓
+StateGraph: planner → agent ⇄ tools (loop) → END
+    │
+    ├── planner node: _plan_override(query) — deterministic portfolio_id match
+    │     match  → plan = ["track_portfolio"]                (case 12 fix, skips LLM)
+    │     no match → LLM planner (temp=0, structured output) classifies plan
+    │
+    ├── agent node: model (ALL tools bound) → reconcile tool_calls to plan
+    │     • upper bound (every turn): drop off-plan calls      (case 5 fix)
+    │     • lower bound (first turn): synthesize omitted planned calls (case 10 fix)
+    │
+    └── tools node (ToolNode) — executes only reconciled calls
+          ├── get_stock_price            → YFinanceProvider → 5d history
+          ├── get_stock_financials       → YFinanceProvider → .info
+          ├── get_hurst_exponent         → YFinanceProvider 1Y + numpy R/S + Rolling Hurst + IC + IR
+          ├── analyze_portfolio_risk     → YFinanceProvider 1Y + numpy/pandas (amount-based) + Risk Contribution
+          ├── track_portfolio            → SQLite + YFinanceProvider 5d + Risk Contribution
+          └── search_market_news         → OpenAI gpt-4o-mini (Gemini quota: 20 req/day)
+    ↓
+_filter_stoploss() — deterministic post-processing safety net
+    ↓
 LangSmith (traces ทุก step)
     ↓
 FastAPI (5 endpoints)
     ↓
 Streamlit UI (3 tabs) — calls FastAPI via requests
 ```
+
+---
+
+## Agent framework — StateGraph routing (v2 Phase 1) {#agent-framework}
+
+**เหตุผลที่เปลี่ยนจาก `create_react_agent`:** case 5 (query "P/E กับ profit margin ของ AMD"
+over-fetch `get_stock_price`) เป็น model-level semantic association ที่ docstring/prompt-level
+negative routing แก้ไม่ได้ (ดู `docs/POSTMORTEMS.md#docstring-routing`) ต้อง structural fix แทน
+พ่วงแก้ `create_react_agent` deprecation warning ไปด้วยเพราะแตะไฟล์เดียวกันอยู่แล้ว
+
+**Design — planner → agent → tools loop** (`src/agent/core.py::build_agent`):
+
+```python
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    plan: list[str]        # planned tool names for this turn
+```
+
+1. **planner node** — `_plan_override(query)` ก่อนเสมอ: word-boundary match query กับ
+   `_list_portfolio_ids()` (DB) → เจอ id จริง = force `plan = ["track_portfolio"]`, ข้าม LLM
+   planner ทั้งหมด (deterministic, ฟรี token) — แก้ **case 12**: "พอร์ต {id} + risk phrasing"
+   เคย misroute ไปทาง `analyze_portfolio_risk` เพราะ risk/stop-loss wording เป็น semantic signal
+   ที่แรงกว่า id ในสายตา LLM planner ไม่ match → LLM planner (temp=0, `.with_structured_output`)
+   classify tool subset จาก `PLANNER_PROMPT` (แยกจาก `SYSTEM_PROMPT` โดยสิ้นเชิง — ไม่ถือว่าแก้
+   SYSTEM_PROMPT) เขียนแค่ `state["plan"]` ไม่แตะ `messages` (กัน structured-output tool call
+   หลุดเข้า message count ที่ test นับ tool จาก)
+2. **agent node** — bind **ALL** tools เสมอ (bind subset ทำให้ Groq 400 ตอน model พยายามเรียก
+   tool นอก request — ดู journey ด้านล่าง) แล้ว reconcile tool_calls ให้เท่ากับ plan:
+   - **upper bound (ทุก turn)** — drop tool_calls นอก plan → แก้ over-fetch (case 5) ต้องรันทุก
+     turn ไม่ใช่แค่ turn แรก เพราะ P/E semantic pull กลับมา re-request `get_stock_price` บน
+     synthesis turn ได้เช่นกัน (case-5 gap ที่เจอตอน verify)
+   - **lower bound (first turn เท่านั้น)** — synthesize tool_call ที่ planned ไว้แต่ model ข้าม
+     ไป โดยยืม args จาก sibling call/query (deterministic, ไม่มี LLM call เพิ่ม) → แก้ under-call
+     (case 10: `search_market_news` หลุดใน 4-tool query)
+3. **tools node** — `ToolNode(ALL_tools)` execute เฉพาะ tool_calls ที่ผ่าน reconcile
+
+**Fallback:** planner exception หรือคืน list ว่าง → `plan = ALL tools` (revert เป็น greedy เดิม —
+ปลอดภัยกว่า under-trigger)
+
+**Journey — approach ที่ลองแล้วพัง (สรุปสั้น, เต็มอยู่ `docs/POSTMORTEMS.md#docstring-routing`
+และ git history ของ `docs/v2-stategraph-routing.md` ตอนยังไม่ลบ):**
+1. bind เฉพาะ planned tool → Groq 400 (model ยังพยายามเรียก tool นอก request จริง) → ต้อง bind ครบ
+2. prompt/param nudges (directive, temp, reasoning_effort) ไม่พอสำหรับ under-call → ต้อง
+   deterministic synthesis
+3. coverage-gated loop (loop กลับจน plan ครบ) → เพิ่ม LLM call ต่อ query จนชน Groq TPD limit
+   ระหว่าง test → ตัดทิ้ง เปลี่ยนเป็น deterministic construction (final design ข้างบน)
+
+**PLANNER_PROMPT** (`src/agent/core.py`) — แก้ต้องรัน `tests/test_routing_regression.py`
+(13 cases) ซ้ำเหมือนกับ `SYSTEM_PROMPT`:
+
+```python
+PLANNER_PROMPT = """You are a routing planner for a financial analysis agent.
+Given the user's query, decide EXACTLY which tools are required to answer it.
+...
+Critical routing rules:
+1. P/E ratio, valuation multiples, and profit margin are FUNDAMENTALS →
+   get_stock_financials ONLY. Do NOT add get_stock_price.
+...
+"""
+```
+
+ดูฉบับเต็มใน `src/agent/core.py` — เก็บสำเนาเต็มไว้ที่นี่จะซ้ำซ้อนกับ `#system-prompt` section
+ด้านล่าง เพราะเป็น prompt คนละก้อนที่ไม่ควรสับสนกัน (`PLANNER_PROMPT` ไม่เคยถูกส่งเข้า agent node)
+
+**Interface ที่ต้องคงไว้ (caller contract):** `build_agent()` ต้องรองรับ
+`.stream(inputs, config, stream_mode="values")` และ emit `AIMessage.tool_calls` ลง
+`state["messages"]` เพื่อให้ `tests/test_routing_regression.py` และ `run_financial_agent()`
+ทำงานเหมือนเดิม — ไม่เปลี่ยน public interface ทั้งสอง
+
+**Token cost trade-off:** planner เพิ่ม LLM call ต่อ query (~2x เทียบกับ ReAct เดิม) ยกเว้น query
+ที่ `_plan_override` match (ไม่มี extra call เลย) — ยอมรับ trade-off นี้เพื่อแลก routing ที่
+deterministic — ดู `docs/DECISIONS.md#routing`
 
 ---
 
@@ -92,7 +176,7 @@ class YFinanceProvider:
 
 ### UC-news: ข่าว + analyst commentary ✅
 - Tools: `search_market_news` → OpenAI gpt-4o-mini (Gemini free tier 20 req/day หมดเร็ว)
-- Routing: 10/11 ผ่าน (ดู `docs/DECISIONS.md#routing`)
+- Routing: 13/13 ผ่าน (ดู `docs/DECISIONS.md#routing`)
 
 ---
 
@@ -281,7 +365,8 @@ Trace URL:
 
 > **Source of truth คือโค้ดใน `src/agent/prompts.py`** — สำเนานี้เก็บไว้เป็น reference สำหรับ review
 > การแก้ prompt โดยไม่ต้องเปิดโค้ด ถ้าแก้ prompt ในโค้ดแล้วต้อง sync สำเนานี้ด้วย
-> **แก้ prompt ทุกครั้ง → รัน `tests/test_routing_regression.py` (11 cases) ก่อน merge**
+> **แก้ prompt ทุกครั้ง (SYSTEM_PROMPT หรือ PLANNER_PROMPT — ดู `#agent-framework`) → รัน
+> `tests/test_routing_regression.py` (13 cases) ก่อน merge**
 > ทุกบรรทัดในนี้ผ่านการ iterate/verify มาแล้ว — ก่อนแก้บรรทัดใดอ่าน `docs/POSTMORTEMS.md#guardrails`
 > และ `#persona-separation` ว่าบรรทัดนั้นเกิดจาก drift อะไร
 
@@ -351,6 +436,11 @@ GET  /portfolio/{id}      → {portfolio_id, response, trace_id}
 
 `trace_id` = `run_id` จาก `run_financial_agent` — 1:1 กับ LangSmith
 
+`POST /portfolio/positions` — สร้าง portfolio ใหม่ (id ยังไม่มีใน DB) ต้องผ่าน
+`validate_new_portfolio_id()` (`src/api/schemas.py`): ≥5 ตัวอักษร, `[a-z0-9-]+` เท่านั้น,
+ห้ามเป็นคำทั่วไปล้วน (`demo`/`test`/`port`/`portfolio`) → ไม่ผ่าน = `422`. id ที่มีอยู่แล้วใน DB
+(append position เข้าพอร์ตเดิม) ไม่ต้องผ่าน validation นี้ซ้ำ (grandfathered)
+
 **สถานะ:** implemented + verified ผ่าน Swagger UI และ Streamlit ทั้ง 5 endpoints
 **Implementation note:** รันผ่าน `uvicorn main:app --reload` ปกติจาก terminal — ไม่มี threading
 wrapper, nest_asyncio, หรือ ngrok
@@ -381,7 +471,7 @@ src/
 main.py                  ✅ done
 Dockerfile               ✅ done
 tests/
-└── test_routing_regression.py   ✅ done — 11 cases
+└── test_routing_regression.py   ✅ done — 13 cases
 scripts/
 └── test_risk_contribution.py    ✅ done — standalone, ไม่ผ่าน notebook
 streamlit_app.py         ✅ done — 3 tabs

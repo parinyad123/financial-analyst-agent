@@ -79,6 +79,48 @@ Root cause: P/E ผูกกับราคาเชิงความหมา�
 
 Verified deterministic: 5x consistency check ใน `tests/test_routing_regression.py::test_case5_consistency`
 
+**v2 update:** case 5 ไม่ใช่ known limitation อีกต่อไป — StateGraph planner (drop off-plan
+tool_calls ทุก turn) แก้ over-fetch structurally ยืนยัน 5/5 consistency clean (`get_stock_financials`
+เท่านั้น ไม่มี `get_stock_price` หลุด) ดู `docs/ARCHITECTURE.md#agent-framework`
+
+### Case 12 — "พอร์ต {id} + risk phrasing" misroutes ไป analyze_portfolio_risk {#case-12}
+
+Query: "พอร์ต streamlit-test-001: TSLA เสี่ยงสุดไหม และควรตั้ง stop-loss ไหม" — มี portfolio_id
+จริงชัดเจน แต่ LLM planner ดึงไปทาง `analyze_portfolio_risk` (หรือบางรอบไม่เรียก tool เลยเพราะ
+synthesize ไม่ได้) เพราะ risk/stop-loss wording เป็น semantic signal ที่แรงกว่า id string ใน
+สายตา planner — พบตอน manual exploratory test (11-case suite เดิมไม่มี co-trigger case แบบนี้เลย
+จึงมองไม่เห็น boundary นี้)
+
+**Decision: deterministic pre-route แทนแก้ prompt** — `_plan_override()` word-boundary match
+query กับ `_list_portfolio_ids()` จาก DB ก่อนถึง LLM planner เสมอ เหตุผลเดียวกับ stop-loss saga
+(`docs/POSTMORTEMS.md#guardrails`): "มี id จริงในข้อความ" เป็น fact ที่ตรวจสอบได้ตรงไปตรงมา
+ไม่ควรฝากไว้กับ semantic judgment ของ LLM เมื่อมีวิธี deterministic ที่แม่นกว่าเสมอ
+
+**เหตุผลที่เพิ่ม naming validation คู่กัน (`validate_new_portfolio_id`):** `_plan_override`
+พึ่ง exact id string เป็น signal หลัก — id ที่สั้น/เป็นคำทั่วไป (เช่น "port", "demo") เสี่ยง
+false-positive ถ้าไปปรากฏเป็นคำในข้อความอื่นโดยบังเอิญ (แม้ตอนนี้จะ match แบบ whole-id ไม่ใช่
+substring ก็ตาม แต่ id สั้นเกินไปก็ลด specificity ของสัญญาณ) บังคับ ≥5 ตัวอักษร + charset จำกัด
+เฉพาะตอนสร้างใหม่ ทำให้ id ในอนาคตเป็น anchor ที่แข็งแรงสำหรับ pre-route โดยไม่กระทบ id เก่าที่
+มีอยู่แล้ว (grandfathered)
+
+**Regression suite เปลี่ยนสิ่งที่วัด:** เพิ่ม planner classification step ทำให้ 13-case suite
+ตอนนี้วัด **planner accuracy** เป็นหลัก ไม่ใช่แค่ model tool-selection behavior เหมือน suite เดิม
+— planner คือ **single point of routing failure ตัวใหม่**: ถ้า planner จัดกลุ่มผิด ทั้ง reconcile
+step (drop/synthesize) ก็ทำตาม plan ที่ผิดไปด้วย ไม่มีทางแก้ที่ agent node ได้ ต่างจากตอนใช้
+`create_react_agent` ที่ routing ผิดมาจาก model tool-selection โดยตรง — เวลา debug routing fail
+ใหม่ ต้องแยกให้ออกว่าอยู่ที่ planner classification หรือ reconcile logic
+
+**Token cost trade-off:** planner เพิ่ม LLM call แยกต่อ query (~2x เทียบ ReAct เดิมที่ไม่มี
+classification step แยก) ยกเว้น query ที่ `_plan_override` match (0 extra call) — decision คือ
+ยอมรับ cost นี้แลกกับ routing ที่ deterministic แทนที่จะพึ่ง semantic association ของ model
+(เหตุผลเดียวกับทำไม case 5 เลือก structural fix มากกว่า docstring patch ต่อ)
+
+**LangSmith trace lookup gotcha (region):** `ls_client` ตั้ง `api_url="https://api.smith.langchain.com"`
+(US endpoint) เสมอไม่ว่า workspace UI ที่ browser จะ redirect ไปที่ console region ไหน (เช่น APAC
+console URL) — เปิด trace URL จาก workspace UI โดยตรงอาจไม่ตรงกับ run ที่เพิ่ง trace เพราะคนละ
+region endpoint ทางที่ชัวร์สุดคือใช้ `ls_client.read_run(run_id).url` เพื่อได้ URL ที่ตรงกับ client
+ที่ trace จริงเสมอ ไม่เดา URL จาก console UI เอง
+
 ### Emergent tool chaining — ปฏิเสธเป็น design pattern {#emergent-chaining}
 
 พบว่า agent หา workaround เองได้ (เอา market value จาก `track_portfolio` มา proxy เป็น "amount"

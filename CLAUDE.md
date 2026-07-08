@@ -3,7 +3,8 @@
 ## Project overview
 
 Physics-informed financial analysis ผสม quantitative signals (Hurst exponent, IC Score, IR)
-กับ LLM reasoning ผ่าน ReAct agent + LangSmith observability + SQLite persistence
+กับ LLM reasoning ผ่าน LangGraph StateGraph agent (planner→agent→tools) + LangSmith
+observability + SQLite persistence
 
 เป้าหมาย: portfolio project สำหรับสมัครงาน FinTech + tool ใช้งานจริง
 หลักการ scope: **จบและ demo ได้ สำคัญกว่าทะเยอทะยานแล้วค้าง**
@@ -20,13 +21,13 @@ Notebook (`financial_analyst_agent.ipynb`) = historical reference เท่า�
 
 ✅ Done: tools (price/financials/hurst+IC+IR/portfolio_risk/news/track_portfolio),
 FastAPI 5 endpoints, Streamlit 3 tabs, Docker, Risk Contribution + guardrails,
-routing regression 10/11 (case 5 known limitation)
+routing regression 13/13 (v2 Phase 1 complete — case 5 fixed structurally, case 12 fixed)
 
 ⏳ v1 wrap-up remaining (ทำหลัง v2 เสร็จ — ตัดสินใจแล้วว่าทำ v2 ก่อน screen recording):
 - [ ] README update (Risk Contribution + Streamlit + v2 features)
 - [ ] Colab badge (optional)
-- [ ] `create_react_agent` deprecation fix (`src/agent/core.py:37`) — ทำพร้อม v2 Phase 1
-  เพราะแตะ `src/agent/core.py` อยู่แล้ว ไม่ต้องเปิดไฟล์ซ้ำ
+- [x] `create_react_agent` deprecation fix — resolved เป็น side effect ของ v2 Phase 1
+  (StateGraph replacement ไม่ import `create_react_agent` แล้ว)
 
 🔲 Open decision: deployment approach (live deploy vs. repo+README+screen recording)
 — ดู `docs/DECISIONS.md#deployment`
@@ -37,13 +38,13 @@ routing regression 10/11 (case 5 known limitation)
 
 ## v2 — กำลังทำ (ลำดับตาม dependency, ดู `docs/DECISIONS.md#v2-priority` สำหรับเหตุผลเต็ม)
 
-**Phase 1 — Agent infra:**
-1. [ ] StateGraph routing — implement เสร็จ, core suite 11/11 ✅ — เหลือ:
-   guardrail retest (STEP 4) + case5_consistency + distill
-1b. [ ] Case 12 routing gap — "พอร์ต {id} + risk phrasing" misroutes ไป UC-2a
-   → fix ด้วย deterministic pre-route (ดู docs/v2-stategraph-routing.md)
+**Phase 1 — Agent infra: ✅ Complete**
+1. [x] StateGraph routing — planner→agent→tools, core suite 13/13 ✅, guardrail retest
+   (STEP 4) ผ่าน, case5_consistency 5/5 ผ่าน, distill เสร็จ — ดู `docs/ARCHITECTURE.md#agent-framework`
+1b. [x] Case 12 routing gap — "พอร์ต {id} + risk phrasing" misroutes ไป UC-2a
+   → fixed ด้วย deterministic pre-route (`_plan_override`) — ดู `docs/POSTMORTEMS.md#case-12`
 2. [ ] Conversation memory — ต่อจาก StateGraph, ต้อง retest guardrail เดิมทั้งหมดหลังทำ
-3. [ ] `create_react_agent` deprecation fix — ทำพ่วงตอนอยู่ใน core.py
+3. [x] `create_react_agent` deprecation fix — resolved (side effect ของข้อ 1)
 
 **Phase 2 — Feature ใหม่ (ทำหลัง agent infra นิ่งแล้ว):**
 4. [ ] Correlation-based stress test — ต้องมี guardrail กัน false-precision (linear approximation only)
@@ -94,8 +95,8 @@ value โดยตรง — อยู่ backlog รอ v3
 สำเนา SYSTEM_PROMPT เต็ม + annotation ว่าบรรทัดไหนมาจาก drift อะไร → `docs/ARCHITECTURE.md#system-prompt`
 (source of truth คือ `src/agent/prompts.py` — แก้โค้ดแล้วต้อง sync สำเนาด้วย)
 
-**แก้ routing / agent tool selection (เช่น case 5)** → อ่าน `docs/DECISIONS.md#routing`
-+ `docs/ARCHITECTURE.md#tools` ก่อนแก้ docstring ใดๆ
+**แก้ routing / agent tool selection (เช่น case 5, case 12)** → อ่าน `docs/DECISIONS.md#routing`
++ `docs/ARCHITECTURE.md#agent-framework` + `docs/ARCHITECTURE.md#tools` ก่อนแก้ docstring/prompt ใดๆ
 
 **เพิ่ม metric ใหม่ใน portfolio_risk หรือ track_portfolio** → อ่าน `docs/POSTMORTEMS.md#risk-contribution`
 (มี formula + sanity check pattern + tz-bug ที่เคยเจอ)
@@ -128,15 +129,16 @@ optimization)** → อ่าน `docs/DECISIONS.md#external-review` ก่อ�
 
 ## Tech stack (สรุปสั้น — เต็มที่ docs/ARCHITECTURE.md)
 
-LangGraph ReAct + Groq (`gpt-oss-120b`, dev) / Gemini 2.5 Flash (prod) · FastAPI + Pydantic v2
-SQLite + async SQLAlchemy · LangSmith (explicit binding) · Streamlit · yfinance · uv · Docker
+LangGraph custom StateGraph (planner→agent→tools) + Groq (`gpt-oss-120b`, dev) / Gemini 2.5 Flash
+(prod) · FastAPI + Pydantic v2 · SQLite + async SQLAlchemy · LangSmith (explicit binding) ·
+Streamlit · yfinance · uv · Docker
 
 ---
 
 ## Critical rules (กฎที่ผิดบ่อย ถ้าไม่ย้ำจะ regress)
 
 1. **ห้ามซ้อน `@tool` + `@traceable` บนฟังก์ชันเดียวกัน** — แยก outer (`@tool`) / inner (`@traceable`)
-2. **แก้ system prompt ทุกครั้ง → ต้องรัน `tests/test_routing_regression.py` (11 cases) ซ้ำ**
+2. **แก้ system/planner prompt ทุกครั้ง → ต้องรัน `tests/test_routing_regression.py` (13 cases) ซ้ำ**
    ก่อน merge — `PYTHONPATH=.` ต้อง set ก่อนรัน pytest จาก root
 3. **Notebook ≠ source of truth** — bugfix ใน `src/` (SPY tz, error messages, persona separation)
    ไม่ sync กลับ notebook อัตโนมัติ

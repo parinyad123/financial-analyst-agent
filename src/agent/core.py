@@ -19,7 +19,7 @@ from src.tools.financials import get_stock_financials
 from src.tools.hurst import get_hurst_exponent
 from src.tools.news import search_market_news
 from src.tools.portfolio_risk import analyze_portfolio_risk
-from src.tools.portfolio_track import track_portfolio
+from src.tools.portfolio_track import _list_portfolio_ids, track_portfolio
 from src.tools.price import get_stock_price
 
 _logger = logging.getLogger(__name__)
@@ -164,6 +164,28 @@ class AgentState(TypedDict):
     plan: list[str]
 
 
+def _plan_override(query: str) -> list[str] | None:
+    """Deterministic pre-route: if the query contains a word-boundary match of
+    an EXISTING portfolio_id, force `track_portfolio` and skip the LLM planner
+    entirely. Fixes case 12 — "พอร์ต <id>: ... เสี่ยงสุดไหม" pulls the planner
+    toward analyze_portfolio_risk because the risk/stop-loss phrasing is the
+    dominant semantic signal, even though a real saved portfolio is named
+    explicitly. An exact id match is a stronger, unambiguous signal than any
+    prompt wording could express. See docs/DECISIONS.md#routing."""
+    try:
+        portfolio_ids = _list_portfolio_ids()
+    except Exception as exc:
+        _logger.warning("[plan_override] portfolio id lookup failed (%s) — skip override", exc)
+        return None
+    for pid in portfolio_ids:
+        if re.search(rf"(?<![\w-]){re.escape(pid)}(?![\w-])", query):
+            _logger.info(
+                "[plan_override] matched portfolio_id=%r in query → forcing track_portfolio", pid
+            )
+            return ["track_portfolio"]
+    return None
+
+
 def _last_human_query(messages: list) -> str:
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
@@ -238,8 +260,13 @@ def build_agent():
     def planner(state: AgentState) -> dict:
         """Classify which tools are needed. Writes only `plan` — never appends
         to `messages`, so the structured-output tool call does NOT leak into
-        the tool set that callers count from event['messages']."""
+        the tool set that callers count from event['messages']. A deterministic
+        portfolio_id match (_plan_override) short-circuits the LLM call entirely
+        when it applies — cheaper and immune to semantic drift (case 12)."""
         query = _last_human_query(state["messages"])
+        override = _plan_override(query)
+        if override:
+            return {"plan": override}
         try:
             plan = planner_model.invoke(
                 [SystemMessage(content=PLANNER_PROMPT), HumanMessage(content=query)]

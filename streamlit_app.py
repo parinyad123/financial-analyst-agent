@@ -276,6 +276,10 @@ with tab3:
     pf_id = st.text_input(
         "Portfolio ID", placeholder="เช่น my-tech-2025", key="tab3_pf_id"
     ).strip()
+    st.caption(
+        "ใช้ชื่อนี้ถามใน Tab \"ถามทั่วไป\" ได้เลย เช่น 'พอร์ต my-tech-2025 เสี่ยงแค่ไหน' "
+        "— ระบบจะจำพอร์ตนี้ได้จากชื่อโดยตรง"
+    )
     pf_name = st.text_input(
         "ชื่อพอร์ต", placeholder="เช่น Tech Portfolio 2025", key="tab3_pf_name"
     ).strip()

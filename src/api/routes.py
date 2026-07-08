@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from src.agent.core import run_financial_agent
 from src.api.schemas import (
@@ -13,6 +13,7 @@ from src.api.schemas import (
     StockAnalysisRequest,
     StockAnalysisResponse,
     TrackPortfolioResponse,
+    validate_new_portfolio_id,
 )
 from src.database.models import Portfolio, Position
 from src.database.session import AsyncSessionLocal
@@ -83,6 +84,10 @@ async def save_positions(req: SavePositionsRequest):
     async with AsyncSessionLocal() as session:
         pf = await session.get(Portfolio, req.portfolio_id)
         if pf is None:
+            try:
+                validate_new_portfolio_id(req.portfolio_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             pf = Portfolio(portfolio_id=req.portfolio_id, name=req.name)
             session.add(pf)
 

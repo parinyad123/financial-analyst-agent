@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Physics-informed financial analysis ผสม quantitative signals (Hurst exponent, IC Score, IR)
+Explainable financial analysis ผสม quantitative signals (Hurst exponent, IC Score, IR)
 กับ LLM reasoning ผ่าน LangGraph StateGraph agent (planner→agent→tools) + LangSmith
 observability + SQLite persistence
 

@@ -1,6 +1,6 @@
 # 📊 Financial Analyst Agent
 
-> Physics-informed quantitative financial analysis powered by a ReAct agent — combining Hurst exponent regime detection, signal-quality validation (IC/IR), and classic risk analytics with LLM reasoning. Built as both a portfolio project and a usable analysis tool.
+> Explainable quantitative financial analysis powered by a ReAct agent — combining Hurst exponent regime detection, signal-quality validation (IC/IR), and classic risk analytics with LLM reasoning. Built as both a portfolio project and a usable analysis tool.
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue)](#tech-stack)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker)](#running-with-docker)

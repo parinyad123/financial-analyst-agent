@@ -133,12 +133,17 @@ This opens three tabs mirroring the use cases above — general questions, what-
 
 ```
 GET  /health
-POST /analyze/stock       → {query, response, ticker, trace_id}
-POST /analyze/portfolio   → {portfolio, query, response, trace_id}
+POST /analyze/stock        → {query, response, ticker, trace_id}
+POST /analyze/portfolio    → {portfolio, query, response, trace_id}
                              body: {"portfolio": {"NVDA": 5000, "AMD": 3000}}
-POST /portfolio/positions → {portfolio_id, name, positions_saved}
-GET  /portfolio/{id}      → {portfolio_id, response, trace_id}
+POST /portfolio/positions  → {portfolio_id, name, positions_saved}
+GET  /portfolios           → {portfolios: [{portfolio_id, name, tickers}]}
+GET  /portfolio/{id}       → {portfolio_id, response, trace_id}
+POST /portfolio/{id}/ask   → {portfolio_id, query, response, trace_id}
+                             body: {"query": "which holding is riskiest?"}
 ```
+
+`POST /portfolio/{id}/ask` lets you ask free-text questions about a saved portfolio *in the same view as its tracking report*. It routes through the general agent (so the planner can freely reach for news/regime/price tools) while injecting the current tracking report as context — so portfolio-level questions ("which holding is riskiest?") are answered from the already-computed risk contribution without a redundant tool call. The injected context is stripped of the portfolio id so it doesn't collide with the deterministic pre-route.
 
 ---
 

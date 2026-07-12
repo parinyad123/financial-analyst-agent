@@ -5,9 +5,13 @@ from fastapi import APIRouter, HTTPException
 
 from src.agent.core import run_financial_agent
 from src.api.schemas import (
+    AskPortfolioRequest,
+    AskPortfolioResponse,
     HealthResponse,
     PortfolioAnalysisRequest,
     PortfolioAnalysisResponse,
+    PortfolioListItem,
+    PortfolioListResponse,
     SavePositionsRequest,
     SavePositionsResponse,
     StockAnalysisRequest,
@@ -17,6 +21,11 @@ from src.api.schemas import (
 )
 from src.database.models import Portfolio, Position
 from src.database.session import AsyncSessionLocal
+from src.tools.portfolio_track import (
+    _list_portfolios,
+    _load_positions,
+    _track_portfolio_logic,
+)
 
 router = APIRouter()
 
@@ -108,6 +117,19 @@ async def save_positions(req: SavePositionsRequest):
     )
 
 
+@router.get("/portfolios", response_model=PortfolioListResponse)
+async def list_portfolios():
+    """List saved portfolios (id, name, tickers) — powers the tracking-tab
+    dropdown that lets users pick by name while the system uses portfolio_id."""
+    rows = await asyncio.to_thread(_list_portfolios)
+    return PortfolioListResponse(
+        portfolios=[
+            PortfolioListItem(portfolio_id=pid, name=name, tickers=tickers)
+            for pid, name, tickers in rows
+        ]
+    )
+
+
 @router.get("/portfolio/{portfolio_id}", response_model=TrackPortfolioResponse)
 async def get_portfolio(portfolio_id: str):
     result = await asyncio.to_thread(
@@ -118,6 +140,73 @@ async def get_portfolio(portfolio_id: str):
     )
     return TrackPortfolioResponse(
         portfolio_id=portfolio_id,
+        response=result["response"],
+        trace_id=result["run_id"],
+    )
+
+
+@router.post("/portfolio/{portfolio_id}/ask", response_model=AskPortfolioResponse)
+async def ask_portfolio(portfolio_id: str, req: AskPortfolioRequest):
+    """Ask a free-text question about a saved portfolio, in the same page as the
+    tracking view. Routes through the GENERAL agent (not track_portfolio) so the
+    planner can freely pick news/hurst/price tools — the current track report is
+    injected as context so portfolio-level questions ("which is riskiest") are
+    answerable without re-calling a tool.
+
+    CRITICAL: the injected context must NOT contain the portfolio_id as a token,
+    or _plan_override (src/agent/core.py) would match it and force track_portfolio,
+    defeating the free routing. We build the context as a natural-language
+    description of the holdings and drop the report's header line (the only place
+    the id appears) so the id never enters the context in the first place — with a
+    final .replace() as a defense-in-depth safety net."""
+    user_q = (req.query or "").strip()
+    if not user_q:
+        raise HTTPException(status_code=422, detail="query ว่าง")
+
+    # 1) Load positions → 404 if unknown + get tickers for the trace/context
+    try:
+        _pf_name, positions = await asyncio.to_thread(_load_positions, portfolio_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"ไม่พบ portfolio_id '{portfolio_id}'"
+        ) from exc
+    if not positions:
+        raise HTTPException(
+            status_code=404, detail=f"พอร์ต '{portfolio_id}' ยังไม่มี position"
+        )
+    tickers = sorted({p["ticker"].upper() for p in positions})
+
+    # 2) Build the current track report to use as context
+    report = await asyncio.to_thread(_track_portfolio_logic, portfolio_id)
+
+    # 3) Frame as natural language — the id lives ONLY in the report's header line
+    #    ("Portfolio: {name} (id: {id})"), so drop it; the body is tickers + numbers.
+    #    positions guaranteed non-empty above → report is always multi-line here.
+    report_body = report.split("\n", 1)[1] if "\n" in report else report
+    # Frame as the system's OWN tool-computed analysis (single voice) — otherwise the
+    # model treats the injected block as third-party "given data" and hedges ("ข้อมูลที่
+    # ให้มา"), which also collides with the system prompt's "numbers must come from a
+    # tool" rule. This legitimizes the figures as real tool output without inviting the
+    # model to invent numbers the report does not contain.
+    context = (
+        f"ต่อไปนี้คือผลวิเคราะห์พอร์ต (หุ้น: {', '.join(tickers)}) ที่ระบบคำนวณจากเครื่องมือ "
+        f"risk analysis แล้ว — ใช้ตัวเลขเหล่านี้ตอบได้เต็มที่เสมือนเป็นผลวิเคราะห์ของคุณเอง "
+        f"ห้ามพูดทำนอง 'ข้อมูลที่ให้มา' หรือ 'เท่าที่มีข้อมูล':\n{report_body}"
+    )
+    # safety net (defense-in-depth) — never let a stray id reach _plan_override
+    context = context.replace(portfolio_id, "<พอร์ตนี้>")
+
+    query = f"{context}\n\n[คำถาม] {user_q}"
+
+    result = await asyncio.to_thread(
+        run_financial_agent,
+        query,
+        tickers or None,
+        "stock_analysis",
+    )
+    return AskPortfolioResponse(
+        portfolio_id=portfolio_id,
+        query=user_q,
         response=result["response"],
         trace_id=result["run_id"],
     )

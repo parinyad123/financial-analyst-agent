@@ -36,12 +36,37 @@ async def _list_portfolio_ids_async() -> list[str]:
         return [row[0] for row in result.all()]
 
 
+async def _list_portfolios_async() -> list[tuple[str, str, list[str]]]:
+    """คืน (portfolio_id, name, [tickers]) ของทุกพอร์ต — ใช้สร้าง dropdown
+    เลือกพอร์ตด้วยชื่อ (UI) + ส่ง tickers เป็น context ให้ /ask.
+    Query เดียว join positions, group ticker ต่อพอร์ตใน Python (พอร์ตมีไม่กี่ตัว)."""
+    async with AsyncSessionLocal() as session:
+        pf_result = await session.execute(
+            select(Portfolio.portfolio_id, Portfolio.name)
+        )
+        portfolios = pf_result.all()
+        pos_result = await session.execute(
+            select(Position.portfolio_id, Position.ticker)
+        )
+        tickers_by_pf: dict[str, list[str]] = {}
+        for pid, ticker in pos_result.all():
+            tickers_by_pf.setdefault(pid, []).append(ticker)
+        return [
+            (pid, name, sorted(set(tickers_by_pf.get(pid, []))))
+            for pid, name in portfolios
+        ]
+
+
 def _load_positions(portfolio_id: str):
     return asyncio.run(_load_positions_async(portfolio_id))
 
 
 def _list_portfolio_ids() -> list[str]:
     return asyncio.run(_list_portfolio_ids_async())
+
+
+def _list_portfolios() -> list[tuple[str, str, list[str]]]:
+    return asyncio.run(_list_portfolios_async())
 
 
 @tool

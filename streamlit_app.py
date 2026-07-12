@@ -77,7 +77,7 @@ st.set_page_config(
 )
 st.title("📊 Financial Analyst Agent")
 st.caption(
-    "Powered by LangGraph ReAct + Groq · ข้อมูลจาก yfinance · "
+    "Powered by LangGraph StateGraph + Groq · ข้อมูลจาก yfinance · "
     "**ไม่ใช่คำแนะนำการลงทุน**"
 )
 
@@ -90,6 +90,10 @@ for key, default in [
     ("tab2_query_area", ""),
     ("tab3_row_ids", [0]),
     ("tab3_next_id", 1),
+    ("tab3_ask_area", ""),
+    ("tab3_view_result", None),   # persisted GET /portfolio/{id} result
+    ("tab3_ask_result", None),    # persisted POST /portfolio/{id}/ask result
+    ("tab3_active_id", None),     # portfolio_id currently viewed/asked
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -349,21 +353,81 @@ with tab3:
 
     st.divider()
 
-    # ── Section B: ดูพอร์ตที่มีอยู่  →  GET /portfolio/{id} ─────────────────
+    # ── Section B: ดูพอร์ต + ถามต่อ  →  GET /portfolio/{id} + POST /portfolio/{id}/ask ──
     st.markdown("### ดูพอร์ตที่บันทึกไว้")
     st.caption(
-        "agent จะดึงราคาปัจจุบันและรายงาน unrealized P&L, market value, "
-        "และ current weight ของแต่ละ position"
+        "เลือกพอร์ตจากชื่อ — agent ดึงราคาปัจจุบัน รายงาน P&L, market value, "
+        "current weight แล้วถามต่อเจาะจงได้ในหน้านี้เลย"
     )
 
-    view_id = st.text_input(
-        "Portfolio ID", placeholder="เช่น my-tech-2025", key="tab3_view_id"
-    ).strip()
+    pf_list = _call("GET", "/portfolios").get("portfolios", [])
+    if not pf_list:
+        st.info("ยังไม่มีพอร์ตที่บันทึกไว้ — สร้างพอร์ตใหม่ในส่วนด้านบนก่อน")
+    else:
+        # label แสดง "ชื่อ (id)" แต่ระบบใช้ portfolio_id เบื้องหลัง (ชื่อใน DB ไม่ unique)
+        options = {f"{p['name']} ({p['portfolio_id']})": p for p in pf_list}
+        picked = options[
+            st.selectbox("เลือกพอร์ต", list(options.keys()), key="tab3_pick")
+        ]
+        view_id = picked["portfolio_id"]
 
-    if st.button("ดูพอร์ต", type="primary", key="tab3_view"):
-        if not view_id:
-            st.warning("กรุณากรอก Portfolio ID")
-        else:
-            with st.spinner(f"กำลังโหลดพอร์ต '{view_id}' ..."):
+        if st.button("ดูพอร์ต", type="primary", key="tab3_view"):
+            with st.spinner(f"กำลังโหลดพอร์ต '{picked['name']}' ..."):
                 data = _call("GET", f"/portfolio/{view_id}")
-            _show_result(data)
+            st.session_state["tab3_view_result"] = data
+            st.session_state["tab3_ask_result"] = None  # reset Q&A เก่าของพอร์ตก่อนหน้า
+            st.session_state["tab3_active_id"] = view_id
+
+        # persist report ข้าม rerun (กด "ถาม" ทำให้ rerun — report ต้องไม่หาย)
+        if (
+            st.session_state["tab3_view_result"]
+            and st.session_state["tab3_active_id"] == view_id
+        ):
+            _show_result(st.session_state["tab3_view_result"])
+
+            st.divider()
+            st.write("**ถามเจาะจงพอร์ตนี้**")
+            tickers = picked.get("tickers", [])
+            first_tk = tickers[0] if tickers else "หุ้น"
+            a1, a2, a3 = st.columns(3)
+            with a1:
+                if st.button("⚠️ ตัวไหนเสี่ยงสุด", use_container_width=True, key="qb3_risk"):
+                    st.session_state["tab3_ask_area"] = (
+                        "ในพอร์ตนี้ หุ้นตัวไหน contribute ความเสี่ยง (variance) มากสุด เพราะอะไร"
+                    )
+            with a2:
+                if st.button(f"📰 ข่าว {first_tk}", use_container_width=True, key="qb3_news"):
+                    st.session_state["tab3_ask_area"] = f"{first_tk} มีข่าวอะไรล่าสุดที่ส่งผลต่อราคา"
+            with a3:
+                if st.button(f"📐 {first_tk} trending?", use_container_width=True, key="qb3_hurst"):
+                    st.session_state["tab3_ask_area"] = (
+                        f"ตอนนี้ {first_tk} เป็น trending หรือ mean-reverting"
+                    )
+
+            ask_q = st.text_area(
+                "คำถาม",
+                key="tab3_ask_area",
+                height=80,
+                placeholder="เช่น ตัวไหนขาดทุนอยู่ / NVDA มีข่าวอะไร / TSLA trending ไหม",
+            )
+            st.caption(
+                "ℹ️ ถามเรื่องหุ้นในพอร์ตได้อิสระ (ข่าว/regime/ราคา) และคำถามระดับพอร์ต "
+                "('ตัวไหนเสี่ยงสุด') — agent ไม่จำคำถามก่อนหน้า (ยังไม่มี memory)"
+            )
+
+            if st.button("ถาม", type="primary", key="tab3_ask"):
+                if not ask_q.strip():
+                    st.warning("กรุณาพิมพ์คำถามหรือกดปุ่มด่วน")
+                else:
+                    with st.spinner("กำลังตอบ (อาจใช้เวลา 30–60 วินาที)..."):
+                        data = _call(
+                            "POST", f"/portfolio/{view_id}/ask", json={"query": ask_q}
+                        )
+                    st.session_state["tab3_ask_result"] = data
+
+        if (
+            st.session_state["tab3_ask_result"]
+            and st.session_state["tab3_active_id"] == view_id
+        ):
+            st.markdown("#### คำตอบ")
+            _show_result(st.session_state["tab3_ask_result"])

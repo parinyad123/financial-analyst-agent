@@ -427,21 +427,30 @@ misconception (principle-based) อยู่ในโค้ดจริงด้
 
 ```
 GET  /health
-POST /analyze/stock       → {query, response, ticker, trace_id}
-POST /analyze/portfolio   → {portfolio, query, response, trace_id}
-                            Body: {"portfolio": {"NVDA": 5000, "AMD": 3000}}
-POST /portfolio/positions → {portfolio_id, name, positions_saved}
-GET  /portfolio/{id}      → {portfolio_id, response, trace_id}
+POST /analyze/stock        → {query, response, ticker, trace_id}
+POST /analyze/portfolio    → {portfolio, query, response, trace_id}
+                             Body: {"portfolio": {"NVDA": 5000, "AMD": 3000}}
+POST /portfolio/positions  → {portfolio_id, name, positions_saved}
+GET  /portfolios           → {portfolios: [{portfolio_id, name, tickers}]}   # dropdown
+GET  /portfolio/{id}       → {portfolio_id, response, trace_id}              # track report
+POST /portfolio/{id}/ask   → {portfolio_id, query, response, trace_id}       # ถามต่อในหน้าติดตาม
 ```
 
 `trace_id` = `run_id` จาก `run_financial_agent` — 1:1 กับ LangSmith
+
+`POST /portfolio/{id}/ask` — ถามต่อเรื่องพอร์ตที่บันทึกไว้ในหน้าเดียวกับที่ดู report โดย route ผ่าน
+**general agent** (ไม่ใช่ `track_portfolio`) เพื่อให้ planner เลือก news/hurst/price ได้อิสระ + inject
+track report เป็น **context ภาษาธรรมชาติ** (คำถามระดับพอร์ต เช่น "ตัวไหนเสี่ยงสุด" ตอบจาก context
+ได้เลย). **สำคัญ:** context ห้ามมี `portfolio_id` เป็น token ไม่งั้น `_plan_override` จะ match แล้ว
+force `track_portfolio` — จึงตัด header line ที่มี id ทิ้ง + `.replace()` เป็น safety net, และ frame
+เป็น "ผลวิเคราะห์ของระบบ" เพื่อให้ตอบเสียงเดียว ไม่ hedge ว่าเป็น "ข้อมูลที่ให้มา"
 
 `POST /portfolio/positions` — สร้าง portfolio ใหม่ (id ยังไม่มีใน DB) ต้องผ่าน
 `validate_new_portfolio_id()` (`src/api/schemas.py`): ≥5 ตัวอักษร, `[a-z0-9-]+` เท่านั้น,
 ห้ามเป็นคำทั่วไปล้วน (`demo`/`test`/`port`/`portfolio`) → ไม่ผ่าน = `422`. id ที่มีอยู่แล้วใน DB
 (append position เข้าพอร์ตเดิม) ไม่ต้องผ่าน validation นี้ซ้ำ (grandfathered)
 
-**สถานะ:** implemented + verified ผ่าน Swagger UI และ Streamlit ทั้ง 5 endpoints
+**สถานะ:** implemented + verified ผ่าน Swagger UI และ Streamlit ทั้ง 7 endpoints
 **Implementation note:** รันผ่าน `uvicorn main:app --reload` ปกติจาก terminal — ไม่มี threading
 wrapper, nest_asyncio, หรือ ngrok
 
@@ -491,7 +500,7 @@ business logic
 |---|---|---|
 | ถามทั่วไป | `POST /analyze/stock` | ticker (สำหรับ quick-buttons) + query (free text) |
 | วิเคราะห์ Risk พอร์ต (what-if) | `POST /analyze/portfolio` | dynamic ticker + จำนวนเงิน rows + query เสริม |
-| ติดตามพอร์ต | `POST /portfolio/positions` + `GET /portfolio/{id}` | dynamic ticker + จำนวนหุ้น + ราคาเฉลี่ยที่ซื้อ |
+| ติดตามพอร์ต | `POST /portfolio/positions` + `GET /portfolios` + `GET /portfolio/{id}` + `POST /portfolio/{id}/ask` | บันทึก: ticker+หุ้น+ราคาเฉลี่ย · ดู: dropdown เลือกชื่อพอร์ต · ถามต่อ: free-text ในหน้าเดียว |
 
 **Why Portfolio Risk ไม่ต้องมีจำนวนหุ้น:** `analyze_portfolio_risk` คำนวณจาก weight
 (`amount / total_amount`) ไม่ใช่จำนวนหุ้นจริง — เป็น what-if ก่อนซื้อ ต่างจาก Portfolio Tracking

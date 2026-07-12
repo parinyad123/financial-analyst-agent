@@ -102,3 +102,17 @@
 - [x] Routing regression ขยายเป็น 13 cases (เพิ่ม case 12 + counter-case 13) — 13/13 passed
 - [x] `test_case5_consistency` (5 รอบ) + adversarial guardrail retest (3 รอบ) + persona separation
   formal confirmation — ทั้งหมดผ่าน, รายละเอียด: `docs/POSTMORTEMS.md#guardrails`
+
+## v2 — Track-portfolio Q&A (ถามต่อในหน้าติดตามพอร์ต) ✅ Complete
+- [x] `GET /portfolios` — list (portfolio_id, name, tickers) สำหรับ dropdown เลือกพอร์ตด้วยชื่อ
+  (ชื่อใน DB ไม่ unique → UI โชว์ชื่อ แต่ระบบใช้ id เบื้องหลัง) — `src/tools/portfolio_track.py::_list_portfolios`
+- [x] `POST /portfolio/{id}/ask` — ถาม free-text เรื่องพอร์ตในหน้าเดียวกับ report โดย route ผ่าน
+  general agent (ไม่ force `track_portfolio`) + inject track report เป็น context ภาษาธรรมชาติ →
+  คำถามระดับหุ้น (news/hurst/price) planner เลือกเอง, คำถามระดับพอร์ต ("ตัวไหนเสี่ยงสุด") ตอบจาก
+  context. **id-safety:** ตัด header line ที่มี id ทิ้ง + `.replace()` safety net → `_plan_override`
+  ไม่ยิง (verified None ทุกพอร์ต). **persona:** frame เป็น "ผลวิเคราะห์ของระบบ" กัน model hedge ว่าเป็น
+  "ข้อมูลที่ให้มา" — รายละเอียด: `docs/ARCHITECTURE.md#fastapi-spec`
+- [x] Streamlit Tab ติดตามพอร์ต — dropdown เลือกชื่อพอร์ต + report persist + ช่องถามต่อ + quick buttons
+- [x] Verify: regression 13/13 ไม่ regress (ไม่แตะ agent core), live /ask ระดับหุ้น→hurst + ระดับพอร์ต→
+  context, seam phrases หายหมด, 404 guard, `_plan_override`=None
+- ขอบเขตที่ยังไม่ทำ (รอ conversation memory): พอร์ต+หุ้นปน turn เดียว, multi-turn อ้างอิงย้อนหลัง

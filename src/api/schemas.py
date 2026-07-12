@@ -81,3 +81,24 @@ class TrackPortfolioResponse(BaseModel):
     portfolio_id: str
     response: str
     trace_id: str | None
+
+
+class PortfolioListItem(BaseModel):
+    portfolio_id: str
+    name: str
+    tickers: list[str]
+
+
+class PortfolioListResponse(BaseModel):
+    portfolios: list[PortfolioListItem]
+
+
+class AskPortfolioRequest(BaseModel):
+    query: str
+
+
+class AskPortfolioResponse(BaseModel):
+    portfolio_id: str
+    query: str
+    response: str
+    trace_id: str | None

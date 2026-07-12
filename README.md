@@ -1,10 +1,10 @@
 # 📊 Financial Analyst Agent
 
-> Explainable quantitative financial analysis powered by a ReAct agent — combining Hurst exponent regime detection, signal-quality validation (IC/IR), and classic risk analytics with LLM reasoning. Built as both a portfolio project and a usable analysis tool.
+> Explainable quantitative financial analysis powered by a custom LangGraph agent — combining Hurst exponent regime detection, signal-quality validation (IC/IR), and classic risk analytics with LLM reasoning. Built as both a portfolio project and a usable analysis tool.
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue)](#tech-stack)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker)](#running-with-docker)
-[![Tests](https://img.shields.io/badge/routing%20tests-10%2F11%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/routing%20tests-13%2F13%20passing-brightgreen)](#running-tests)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit)](#running-locally)
 
 ---
@@ -14,7 +14,7 @@
 Most "AI stock analyst" demos are a thin LLM wrapper around an API call. This one is different in three ways:
 
 1. **The quant layer is real.** Hurst exponent regime detection, Information Coefficient (signal quality), Information Ratio (signal consistency), Risk Contribution to Variance, and a full risk-analytics suite (Sharpe, Sortino, Calmar, VaR/CVaR, Ulcer Index, rolling correlation, CAPM alpha/beta) are computed with actual time-series math — not LLM-generated numbers.
-2. **The engineering is production-shaped.** LangGraph ReAct orchestration, explicit LangSmith tracing (not env-var dependent), async SQLAlchemy persistence, a FastAPI backend, a Streamlit UI, and a Docker image that's been built, run, and verified end-to-end — not just "works on my notebook."
+2. **The engineering is production-shaped.** A custom LangGraph `StateGraph` (planner → agent → tools) with deterministic routing, explicit LangSmith tracing (not env-var dependent), async SQLAlchemy persistence, a FastAPI backend, a Streamlit UI, and a Docker image that's been built, run, and verified end-to-end — not just "works on my notebook."
 3. **The guardrails are adversarially tested, not assumed.** Every numeric claim the agent makes is backed by a tool result — but getting an LLM to *describe* those numbers correctly is its own engineering problem. This project caught and fixed three separate ways the agent misrepresented correct tool output (see [Design Decisions](#design-decisions)): claiming a hypothetical portfolio's losses were the user's actual losses, inventing stop-loss suggestions despite an explicit rule against it, and describing a correlation coefficient as a literal proportion of time two assets move together. Each fix was verified against the adversarial query that caused it, then checked against the full regression suite.
 
 **Positioning:** Explainable Quant Analytics + Agent Orchestration. This project intentionally does *not* compete on model complexity (no Monte Carlo, no HMM regime models, no opaque factor weights) — every number the agent states is traceable to a deterministic calculation, and every design choice that was *not* made is documented with a reason.
@@ -41,7 +41,9 @@ User query
     ↓
 run_financial_agent() ──@traceable──→ LangSmith (returns trace_id)
     ↓
-ReAct Agent (LangGraph + Groq gpt-oss-120b)
+StateGraph Agent: planner → agent → tools (LangGraph + Groq gpt-oss-120b)
+    │   planner classifies the required tool subset; the agent node then
+    │   reconciles the model's tool calls to that plan (deterministic routing)
     ├── get_stock_price            → live price, 52W range, P/E, market cap
     ├── get_stock_financials       → revenue, margins, growth, EPS, D/E
     ├── get_hurst_exponent         → R/S analysis + Rolling Hurst + IC + IR
@@ -80,7 +82,7 @@ All tool calls are traced end-to-end in LangSmith. Every numeric claim in an age
 
 | Layer | Technology |
 |---|---|
-| Agent framework | LangGraph `create_react_agent` (ReAct) |
+| Agent framework | Custom LangGraph `StateGraph` (planner → agent → tools) |
 | LLM (reasoning) | Groq `openai/gpt-oss-120b` |
 | LLM (news search) | OpenAI `gpt-4o-mini` + `web_search_preview` |
 | Market data | yfinance, behind a `DataProvider` protocol (swappable) |
@@ -168,8 +170,8 @@ A few choices are deliberate and worth explaining if you're reviewing this proje
 **Why does the database only store `ticker`, `shares`, and `avg_cost`?**
 Everything else — current price, market value, unrealized P&L, current weights — is derived live from market data on every request. This avoids any possibility of stale cached prices and removes the need for a sync job entirely.
 
-**Why is there a known routing quirk with "P/E and profit margin" queries?**
-Asking for AMD's P/E and profit margin causes the agent to call both `get_stock_financials` *and* `get_stock_price`, even though only the former is needed — P/E is semantically tied to price, and docstring-level negative-routing instructions can't fully separate the two for an LLM router. It's benign (the price tool is fast and free) and is left as-is for v1; a v2 fix would use explicit `StateGraph` conditional routing instead of relying on prompt engineering alone.
+**Why did the "P/E and profit margin" routing quirk get fixed with a `StateGraph`, not a better prompt?**
+Under the old ReAct agent, asking for AMD's P/E and profit margin made the agent call both `get_stock_financials` *and* `get_stock_price`, even though only the former is needed — P/E is semantically tied to price, and docstring-level negative-routing instructions can't fully separate the two for an LLM router. This was a known v1 limitation. v2 fixes it *structurally*: a dedicated planner node classifies the required tool subset **before** execution, and the agent node reconciles the model's tool calls to that plan — dropping any off-plan call (over-fetch) and synthesizing any planned call the model omitted (under-call). Because routing is enforced on the plan rather than coaxed via prompt wording, the fundamentals-only route now holds deterministically (verified across 5 repeated runs), and the case is no longer an exempted failure in the regression suite.
 
 **Why no backtesting or factor models?**
 Walk-forward backtesting requires a full signal-to-execution pipeline (position sizing, transaction costs, rebalancing rules) that doesn't exist yet — a backtest without those is not a validation, it's noise dressed as a result. Hardcoded factor weights (e.g. `0.3 × momentum + 0.3 × Hurst`) were considered and rejected for the same reason: without per-factor IC validation, fixed weights are narrative quant, not real signal combination.
@@ -191,7 +193,7 @@ A keyword blocklist turned out to be fragile: an early guardrail banned describi
 uv run python -m pytest tests/test_routing_regression.py -s -v
 ```
 
-11 routing regression cases verify that the agent calls the correct tool(s) for a given query — covering under-trigger guards (news queries that must call `search_market_news`), over-trigger guards (numeric queries that must *not* trigger news), multi-tool co-triggering, and exact-match regression for the original single-stock use case. 10/11 pass; the one expected failure is a [documented known limitation](#design-decisions) (P/E queries also fetch live price — benign, and verified deterministic across 5 repeated runs).
+13 routing regression cases verify that the agent calls the correct tool(s) for a given query — covering under-trigger guards (news queries that must call `search_market_news`), over-trigger guards (numeric queries that must *not* trigger news), multi-tool co-triggering, exact-match regression for the original single-stock use case, and the deterministic portfolio-id pre-route (a saved-portfolio query with risk/stop-loss phrasing must route to `track_portfolio`, not `analyze_portfolio_risk`). All 13 pass — the former P/E over-fetch limitation is now fixed structurally by the `StateGraph` planner (see [Design Decisions](#design-decisions)), and a separate consistency test re-runs the P/E case 5× to confirm the fundamentals-only route is deterministic, not luck.
 
 ---
 
@@ -221,7 +223,7 @@ main.py                     # app assembly, uvicorn entry point
 streamlit_app.py             # 3-tab UI calling the FastAPI backend
 Dockerfile
 tests/
-└── test_routing_regression.py   # 11-case routing regression suite
+└── test_routing_regression.py   # 13-case routing regression suite
 scripts/
 └── test_risk_contribution.py    # standalone Risk Contribution sanity check
 notebooks/

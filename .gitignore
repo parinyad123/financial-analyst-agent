@@ -5,4 +5,7 @@ __pycache__/
 
 # SQLite — persisted via Docker volume at runtime
 portfolio.db
+checkpoints.db
+*.db-shm
+*.db-wal
 data/

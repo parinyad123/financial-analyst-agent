@@ -4,6 +4,7 @@ Calls FastAPI at http://localhost:8000. Start uvicorn main:app first.
 """
 
 import re
+import uuid
 
 import requests
 import streamlit as st
@@ -94,6 +95,18 @@ for key, default in [
     ("tab3_view_result", None),   # persisted GET /portfolio/{id} result
     ("tab3_ask_result", None),    # persisted POST /portfolio/{id}/ask result
     ("tab3_active_id", None),     # portfolio_id currently viewed/asked
+    # ── conversation-memory threads (see docs: thread scoping) ────────────────
+    # Each tab owns a checkpointer thread. Scoping differs on purpose:
+    #   tab1 — per session, reset by the "เริ่มบทสนทนาใหม่" button
+    #   tab2 — per portfolio composition: changing the form MUST start a new thread,
+    #          or the previous allocation's risk figures linger and get misattributed
+    #   tab3 — per tracking report load: "ดูพอร์ต" mints a new thread so the injected
+    #          snapshot is fresh and injected exactly once
+    ("tab1_thread", str(uuid.uuid4())),
+    ("tab1_history", []),         # [(question, result_dict)] for display
+    ("tab2_thread", str(uuid.uuid4())),
+    ("tab2_pf_hash", None),       # portfolio composition the tab2 thread belongs to
+    ("tab3_thread", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -148,10 +161,19 @@ with tab1:
 
     st.caption(
         "ℹ️ กรอก Ticker แล้วกดปุ่มด่วน หรือพิมพ์คำถามเองได้เลย — "
-        "agent ไม่จำคำถามก่อนหน้า"
+        "agent **จำบทสนทนาก่อนหน้าได้** ถามต่อเนื่องได้เลย เช่น 'แล้วข่าวล่ะ'"
     )
 
-    if st.button("วิเคราะห์", type="primary", key="tab1_submit"):
+    c_ask, c_new = st.columns([3, 1])
+    with c_ask:
+        submitted = st.button("วิเคราะห์", type="primary", key="tab1_submit")
+    with c_new:
+        if st.button("🔄 เริ่มบทสนทนาใหม่", use_container_width=True, key="tab1_reset"):
+            st.session_state["tab1_thread"] = str(uuid.uuid4())
+            st.session_state["tab1_history"] = []
+            st.rerun()
+
+    if submitted:
         if not query1.strip():
             st.warning("กรุณากรอกคำถามหรือกดปุ่มด่วนด้านบน")
         else:
@@ -163,8 +185,21 @@ with tab1:
                 data = _call(
                     "POST",
                     "/analyze/stock",
-                    json={"query": effective_query, "ticker": ticker1 or None},
+                    json={
+                        "query": effective_query,
+                        "ticker": ticker1 or None,
+                        "session_id": st.session_state["tab1_thread"],
+                    },
                 )
+            st.session_state["tab1_history"].append((query1, data))
+
+    # newest first — the agent keeps the real memory server-side; this is just the transcript
+    history = st.session_state["tab1_history"]
+    if history:
+        st.divider()
+        st.caption(f"บทสนทนานี้ ({len(history)} คำถาม) — กด 'เริ่มบทสนทนาใหม่' เพื่อล้าง")
+        for q, data in reversed(history):
+            st.markdown(f"**❓ {q}**")
             _show_result(data)
 
 
@@ -254,11 +289,21 @@ with tab2:
         if not portfolio:
             st.warning("กรุณากรอก Ticker และ Amount (USD > 0) อย่างน้อย 1 ตัว")
         else:
+            # A changed allocation is a different portfolio — start a new memory thread so
+            # the previous one's risk figures cannot be carried over and misattributed.
+            pf_hash = str(sorted(portfolio.items()))
+            if pf_hash != st.session_state["tab2_pf_hash"]:
+                st.session_state["tab2_thread"] = str(uuid.uuid4())
+                st.session_state["tab2_pf_hash"] = pf_hash
             with st.spinner(f"กำลังวิเคราะห์พอร์ต {list(portfolio.keys())} ..."):
                 data = _call(
                     "POST",
                     "/analyze/portfolio",
-                    json={"portfolio": portfolio, "query": query2},
+                    json={
+                        "portfolio": portfolio,
+                        "query": query2,
+                        "session_id": st.session_state["tab2_thread"],
+                    },
                 )
             _show_result(data)
 
@@ -377,6 +422,9 @@ with tab3:
             st.session_state["tab3_view_result"] = data
             st.session_state["tab3_ask_result"] = None  # reset Q&A เก่าของพอร์ตก่อนหน้า
             st.session_state["tab3_active_id"] = view_id
+            # New report load = new memory thread: the backend injects this snapshot once
+            # per thread, so a fresh thread guarantees the Q&A is about the report shown.
+            st.session_state["tab3_thread"] = str(uuid.uuid4())
 
         # persist report ข้าม rerun (กด "ถาม" ทำให้ rerun — report ต้องไม่หาย)
         if (
@@ -412,7 +460,8 @@ with tab3:
             )
             st.caption(
                 "ℹ️ ถามเรื่องหุ้นในพอร์ตได้อิสระ (ข่าว/regime/ราคา) และคำถามระดับพอร์ต "
-                "('ตัวไหนเสี่ยงสุด') — agent ไม่จำคำถามก่อนหน้า (ยังไม่มี memory)"
+                "('ตัวไหนเสี่ยงสุด') — **ถามต่อเนื่องได้** agent จำบทสนทนาในพอร์ตนี้ "
+                "(กด 'ดูพอร์ต' ใหม่ = เริ่มบทสนทนาใหม่)"
             )
 
             if st.button("ถาม", type="primary", key="tab3_ask"):
@@ -421,7 +470,12 @@ with tab3:
                 else:
                     with st.spinner("กำลังตอบ (อาจใช้เวลา 30–60 วินาที)..."):
                         data = _call(
-                            "POST", f"/portfolio/{view_id}/ask", json={"query": ask_q}
+                            "POST",
+                            f"/portfolio/{view_id}/ask",
+                            json={
+                                "query": ask_q,
+                                "session_id": st.session_state["tab3_thread"],
+                            },
                         )
                     st.session_state["tab3_ask_result"] = data
 

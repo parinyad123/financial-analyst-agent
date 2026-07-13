@@ -25,6 +25,10 @@ GROQ_API_KEY = _groq_key
 
 DB_PATH = os.environ.get("DB_PATH", "portfolio.db")
 
+# LangGraph checkpointer (conversation memory) — kept in a SEPARATE sqlite file so the
+# checkpoint schema never mixes with the SQLAlchemy portfolio models in DB_PATH.
+CHECKPOINT_DB_PATH = os.environ.get("CHECKPOINT_DB_PATH", "checkpoints.db")
+
 ls_client = Client(
     api_key=_langchain_key,
     api_url="https://api.smith.langchain.com",

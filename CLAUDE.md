@@ -20,11 +20,12 @@ Repo: `parinyad123/financial-analyst-agent`
 Notebook (`financial_analyst_agent.ipynb`) = historical reference เท่านั้น ห้ามใช้ทดลอง feature ใหม่
 
 ✅ Done: tools (price/financials/hurst+IC+IR/portfolio_risk/news/track_portfolio),
-FastAPI 5 endpoints, Streamlit 3 tabs, Docker, Risk Contribution + guardrails,
-routing regression 13/13 (v2 Phase 1 complete — case 5 fixed structurally, case 12 fixed)
+FastAPI 7 endpoints, Streamlit 3 tabs, Docker, Risk Contribution + guardrails,
+routing regression 13/13 + multi-turn memory 4/4 (v2 Phase 1 complete — case 5 fixed
+structurally, case 12 fixed, track-portfolio Q&A, conversation memory)
 
-⏳ v1 wrap-up remaining (ทำหลัง v2 เสร็จ — ตัดสินใจแล้วว่าทำ v2 ก่อน screen recording):
-- [ ] README update (Risk Contribution + Streamlit + v2 features)
+⏳ v1 wrap-up remaining:
+- [x] README update — sync v2 แล้ว (StateGraph, 13/13, endpoints ใหม่)
 - [ ] Colab badge (optional)
 - [x] `create_react_agent` deprecation fix — resolved เป็น side effect ของ v2 Phase 1
   (StateGraph replacement ไม่ import `create_react_agent` แล้ว)
@@ -43,7 +44,11 @@ routing regression 13/13 (v2 Phase 1 complete — case 5 fixed structurally, cas
    (STEP 4) ผ่าน, case5_consistency 5/5 ผ่าน, distill เสร็จ — ดู `docs/ARCHITECTURE.md#agent-framework`
 1b. [x] Case 12 routing gap — "พอร์ต {id} + risk phrasing" misroutes ไป UC-2a
    → fixed ด้วย deterministic pre-route (`_plan_override`) — ดู `docs/POSTMORTEMS.md#case-12`
-2. [ ] Conversation memory — ต่อจาก StateGraph, ต้อง retest guardrail เดิมทั้งหมดหลังทำ
+1c. [x] Track-portfolio Q&A — ถามต่อในหน้าติดตามพอร์ต (`GET /portfolios` + `POST /portfolio/{id}/ask`)
+   route ผ่าน general agent + inject report เป็น context (ไม่ใส่ id → `_plan_override` ไม่ยิง)
+2. [x] Conversation memory — SqliteSaver checkpointer + thread scoping ต่อ tab, ไม่แตะ SYSTEM_PROMPT
+   (ใช้ runtime SystemMessage `CONVERSATION_CONTEXT_NOTE` กัน stale-number) — regression 13/13 +
+   multi-turn 4/4 ผ่าน — ดู `docs/ARCHITECTURE.md#memory`
 3. [x] `create_react_agent` deprecation fix — resolved (side effect ของข้อ 1)
 
 **Phase 2 — Feature ใหม่ (ทำหลัง agent infra นิ่งแล้ว):**
@@ -148,6 +153,10 @@ Streamlit · yfinance · uv · Docker
    (hyphen `U+2011` vs `U+002D` เคยทำให้ filter ไม่ trigger เงียบๆ)
 6. **Regression fail ≠ regression จริงเสมอ** — isolate case ที่ fail รันเดี่ยว 3 รอบก่อนสรุป
    ว่าเป็น LLM nondeterministic fluke หรือ regression จริง
+7. **Graph compile ด้วย checkpointer แล้ว** — ทุก invoke/stream **ต้องมี `configurable={"thread_id": ...}`**
+   ไม่งั้น error. ไม่ส่ง `session_id` เข้า `run_financial_agent` = สุ่ม thread ใหม่ = stateless แบบเดิม
+8. **`_plan_override` ต้องเห็นแค่ last human query ห้ามเห็น history** — ไม่งั้น portfolio_id ที่พูดถึง
+   หลาย turn ก่อนจะ force `track_portfolio` ค้างตลอดไป (ดู `docs/ARCHITECTURE.md#memory`)
 
 ---
 

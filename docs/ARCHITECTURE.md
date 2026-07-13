@@ -456,6 +456,40 @@ wrapper, nest_asyncio, หรือ ngrok
 
 ---
 
+## Conversation memory {#memory}
+
+**Checkpointer:** LangGraph `SqliteSaver` on `CHECKPOINT_DB_PATH` (default `checkpoints.db`,
+Docker → `/app/data/checkpoints.db`) — **แยกไฟล์จาก `portfolio.db`** ไม่ให้ checkpoint schema ปนกับ
+SQLAlchemy models. `sqlite3.connect(..., check_same_thread=False)` เพราะ `run_financial_agent` เป็น
+sync ที่ถูกเรียกผ่าน `asyncio.to_thread`
+
+**Thread = หน่วยของความจำ.** `run_financial_agent(..., session_id=None)` — ไม่ส่ง `session_id`
+= สุ่ม thread ใหม่ทุกครั้ง = **พฤติกรรม stateless แบบเดิม** (caller เดิม + routing regression ไม่ต้องแก้
+semantics แค่ต้องส่ง `thread_id` เพราะ checkpointer บังคับ)
+
+**Thread scoping ต่อ tab — ตัวคุมความถูกต้อง ไม่ใช่แค่ UX:**
+
+| Tab | thread ผูกกับ | reset เมื่อ | ทำไม |
+|---|---|---|---|
+| ถามทั่วไป | session | ปุ่ม "เริ่มบทสนทนาใหม่" | conversational ตรงไปตรงมา |
+| what-if | session + **hash(portfolio)** | เปลี่ยน form | **กัน misattribution** — ตัวเลข risk พอร์ตเก่าต้องไม่ไหลไปตอบพอร์ตใหม่ |
+| ติดตามพอร์ต | session + report load | กด "ดูพอร์ต" | `/ask` inject report **ครั้งเดียวต่อ thread** (`thread_has_history()`) → snapshot สดและไม่ซ้ำ |
+
+**Prompt strategy — ไม่แตะ `SYSTEM_PROMPT`** (ตาม precedent `[ROUTING PLAN]`):
+- `PLANNER_PROMPT` rule 7 — pronoun resolution: ถ้ามี `[CONVERSATION HISTORY]` และ query อ้างย้อนหลัง
+  ("ตัวนั้น", "แล้ว...ล่ะ") → resolve entity จาก history ก่อนเลือก tool
+- `CONVERSATION_CONTEXT_NOTE` — runtime SystemMessage inject **เฉพาะ turn ที่มี history** กัน
+  **stale-number hazard**: SYSTEM_PROMPT เขียนมาสำหรับ single-turn จึงไม่มีกฎห้าม model ดึงราคาจาก
+  turn ก่อนมาตอบว่าเป็นราคาปัจจุบัน (ทดสอบตรงใน `test_stale_number_forces_tool_recall`)
+
+**กับดักที่ต้องรู้:**
+- `_plan_override` รับ **last human query เท่านั้น** — ถ้าให้เห็น history, portfolio_id ที่พูดถึงหลาย turn
+  ก่อนจะ force `track_portfolio` ค้างตลอดไป
+- `_trim_history()` ใช้ `start_on="human"` — **load-bearing** กัน ToolMessage กำพร้าจาก
+  `AIMessage(tool_calls)` ที่ถูกตัดออก (pairing ขาด → Groq ตอบ 400)
+
+---
+
 ## Target file structure
 
 ```

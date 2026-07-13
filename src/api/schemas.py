@@ -40,11 +40,16 @@ class PositionIn(BaseModel):
 class StockAnalysisRequest(BaseModel):
     query: str
     ticker: str | None = None
+    # Conversation-memory thread. Omit → fresh thread per call (stateless, as before).
+    session_id: str | None = None
 
 
 class PortfolioAnalysisRequest(BaseModel):
     portfolio: dict[str, float]
     query: str = ""
+    # Callers must mint a NEW session_id whenever the portfolio changes, or figures from
+    # the previous allocation would linger in the thread and be misattributed to this one.
+    session_id: str | None = None
 
 
 class SavePositionsRequest(BaseModel):
@@ -95,6 +100,9 @@ class PortfolioListResponse(BaseModel):
 
 class AskPortfolioRequest(BaseModel):
     query: str
+    # Mint a NEW session_id each time the tracking report is (re)loaded — the report is
+    # injected once per thread, so a stale thread would keep answering from an old snapshot.
+    session_id: str | None = None
 
 
 class AskPortfolioResponse(BaseModel):
@@ -102,3 +110,4 @@ class AskPortfolioResponse(BaseModel):
     query: str
     response: str
     trace_id: str | None
+    session_id: str | None = None

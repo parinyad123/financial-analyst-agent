@@ -3,7 +3,7 @@ import json
 
 from fastapi import APIRouter, HTTPException
 
-from src.agent.core import run_financial_agent
+from src.agent.core import run_financial_agent, thread_has_history
 from src.api.schemas import (
     AskPortfolioRequest,
     AskPortfolioResponse,
@@ -45,6 +45,7 @@ async def analyze_stock(req: StockAnalysisRequest):
         req.query,
         tickers,
         "stock_analysis",
+        req.session_id,
     )
     return StockAnalysisResponse(
         query=result["query"],
@@ -79,6 +80,7 @@ async def analyze_portfolio(req: PortfolioAnalysisRequest):
         query,
         list(portfolio_upper.keys()),
         "portfolio_risk",
+        req.session_id,
     )
     return PortfolioAnalysisResponse(
         portfolio=req.portfolio,
@@ -176,37 +178,43 @@ async def ask_portfolio(portfolio_id: str, req: AskPortfolioRequest):
         )
     tickers = sorted({p["ticker"].upper() for p in positions})
 
-    # 2) Build the current track report to use as context
-    report = await asyncio.to_thread(_track_portfolio_logic, portfolio_id)
+    # 2) Inject the report ONCE per conversation thread. On follow-up turns it is already
+    #    in the thread's history, so re-injecting would duplicate a multi-KB block every
+    #    turn and leave several conflicting snapshots in context.
+    if await asyncio.to_thread(thread_has_history, req.session_id):
+        query = user_q
+    else:
+        report = await asyncio.to_thread(_track_portfolio_logic, portfolio_id)
 
-    # 3) Frame as natural language — the id lives ONLY in the report's header line
-    #    ("Portfolio: {name} (id: {id})"), so drop it; the body is tickers + numbers.
-    #    positions guaranteed non-empty above → report is always multi-line here.
-    report_body = report.split("\n", 1)[1] if "\n" in report else report
-    # Frame as the system's OWN tool-computed analysis (single voice) — otherwise the
-    # model treats the injected block as third-party "given data" and hedges ("ข้อมูลที่
-    # ให้มา"), which also collides with the system prompt's "numbers must come from a
-    # tool" rule. This legitimizes the figures as real tool output without inviting the
-    # model to invent numbers the report does not contain.
-    context = (
-        f"ต่อไปนี้คือผลวิเคราะห์พอร์ต (หุ้น: {', '.join(tickers)}) ที่ระบบคำนวณจากเครื่องมือ "
-        f"risk analysis แล้ว — ใช้ตัวเลขเหล่านี้ตอบได้เต็มที่เสมือนเป็นผลวิเคราะห์ของคุณเอง "
-        f"ห้ามพูดทำนอง 'ข้อมูลที่ให้มา' หรือ 'เท่าที่มีข้อมูล':\n{report_body}"
-    )
-    # safety net (defense-in-depth) — never let a stray id reach _plan_override
-    context = context.replace(portfolio_id, "<พอร์ตนี้>")
-
-    query = f"{context}\n\n[คำถาม] {user_q}"
+        # 3) Frame as natural language — the id lives ONLY in the report's header line
+        #    ("Portfolio: {name} (id: {id})"), so drop it; the body is tickers + numbers.
+        #    positions guaranteed non-empty above → report is always multi-line here.
+        report_body = report.split("\n", 1)[1] if "\n" in report else report
+        # Frame as the system's OWN tool-computed analysis (single voice) — otherwise the
+        # model treats the injected block as third-party "given data" and hedges ("ข้อมูลที่
+        # ให้มา"), which also collides with the system prompt's "numbers must come from a
+        # tool" rule. This legitimizes the figures as real tool output without inviting the
+        # model to invent numbers the report does not contain.
+        context = (
+            f"ต่อไปนี้คือผลวิเคราะห์พอร์ต (หุ้น: {', '.join(tickers)}) ที่ระบบคำนวณจากเครื่องมือ "
+            f"risk analysis แล้ว — ใช้ตัวเลขเหล่านี้ตอบได้เต็มที่เสมือนเป็นผลวิเคราะห์ของคุณเอง "
+            f"ห้ามพูดทำนอง 'ข้อมูลที่ให้มา' หรือ 'เท่าที่มีข้อมูล':\n{report_body}"
+        )
+        # safety net (defense-in-depth) — never let a stray id reach _plan_override
+        context = context.replace(portfolio_id, "<พอร์ตนี้>")
+        query = f"{context}\n\n[คำถาม] {user_q}"
 
     result = await asyncio.to_thread(
         run_financial_agent,
         query,
         tickers or None,
         "stock_analysis",
+        req.session_id,
     )
     return AskPortfolioResponse(
         portfolio_id=portfolio_id,
         query=user_q,
         response=result["response"],
         trace_id=result["run_id"],
+        session_id=result["session_id"],
     )

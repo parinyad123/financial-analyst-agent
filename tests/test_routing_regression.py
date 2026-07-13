@@ -8,6 +8,7 @@ Run:
 
 import sys
 import time
+import uuid
 
 import pytest
 from groq import RateLimitError
@@ -110,12 +111,19 @@ _CASE5_1IDX = 5
 
 def get_called_tools(query: str, max_retries: int = 3) -> set:
     """Run agent on one query and return the set of tool names called.
-    Mirrors notebook Cell 27 exactly. Retries on Groq 429 (free-tier TPM limit)."""
+    Mirrors notebook Cell 27 exactly. Retries on Groq 429 (free-tier TPM limit).
+
+    thread_id is REQUIRED now that the graph compiles with a SqliteSaver checkpointer
+    (conversation memory). A fresh uuid per call keeps every routing case single-turn and
+    isolated — history from one case must never influence the next one's routing."""
     for attempt in range(max_retries):
         try:
             called = set()
             inputs = {"messages": [HumanMessage(content=query)]}
-            config = RunnableConfig(callbacks=[tracer])
+            config = RunnableConfig(
+                callbacks=[tracer],
+                configurable={"thread_id": str(uuid.uuid4())},
+            )
             for event in _agent_graph.stream(inputs, config=config, stream_mode="values"):
                 for msg in event.get("messages", []):
                     if isinstance(msg, AIMessage) and msg.tool_calls:

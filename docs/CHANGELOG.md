@@ -116,3 +116,24 @@
 - [x] Verify: regression 13/13 ไม่ regress (ไม่แตะ agent core), live /ask ระดับหุ้น→hurst + ระดับพอร์ต→
   context, seam phrases หายหมด, 404 guard, `_plan_override`=None
 - ขอบเขตที่ยังไม่ทำ (รอ conversation memory): พอร์ต+หุ้นปน turn เดียว, multi-turn อ้างอิงย้อนหลัง
+
+## v2 Phase 1 ข้อ 2 — Conversation Memory ✅ Complete
+- [x] **SqliteSaver checkpointer** (`langgraph-checkpoint-sqlite`) — `checkpoints.db` แยกไฟล์จาก
+  `portfolio.db` (`CHECKPOINT_DB_PATH`, Docker → `/app/data/`) → memory รอด restart
+  `run_financial_agent(..., session_id=None)` — **ไม่ส่ง session_id = สุ่ม thread ใหม่ = stateless
+  แบบเดิม** (backward compatible กับ caller เดิมทั้งหมด)
+- [x] **Thread scoping** (กัน context ปนข้ามบริบท): tab1 = per session · tab2 = **per hash(portfolio)**
+  (เปลี่ยน form = thread ใหม่ → กัน misattribution ตัวเลข risk พอร์ตเก่า) · tab3 = per report load
+  (กด "ดูพอร์ต" = thread ใหม่ → `/ask` inject report **ครั้งเดียวต่อ thread** ผ่าน `thread_has_history()`)
+- [x] **ไม่แตะ `SYSTEM_PROMPT`** — ทำตาม precedent `[ROUTING PLAN]`: `PLANNER_PROMPT` += กฎ pronoun
+  resolution (rule 7) และเพิ่ม `CONVERSATION_CONTEXT_NOTE` เป็น runtime SystemMessage inject
+  **เฉพาะ turn ที่มี history** → กัน **stale-number hazard** (SYSTEM_PROMPT เขียนมาสำหรับ single-turn
+  จึงไม่ห้าม model ดึงราคาจาก turn ก่อนมาตอบว่าเป็นราคาปัจจุบัน)
+- [x] `_trim_history()` — cap context ~6000 tokens, `start_on="human"` **สำคัญ**: กัน ToolMessage
+  กำพร้าจาก AIMessage(tool_calls) ที่ถูกตัด (pairing ขาด = Groq 400)
+- [x] `_plan_override` ยังรับ **last human query เท่านั้น** (ไม่ใช่ history) — ไม่งั้น portfolio_id ที่
+  พูดถึงหลาย turn ก่อนจะ force `track_portfolio` ค้างตลอด
+- [x] `tests/test_memory_multiturn.py` (4 cases) — follow-up resolution ("แล้วข่าวล่ะ" → news),
+  thread isolation, **stale-number** (ถามราคาซ้ำ = เรียก tool ใหม่), persona separation ข้าม turn
+- [x] Verify: regression **13/13** + case5 consistency 5/5 + stoploss filter + multi-turn 4/4 ผ่านหมด
+  (test เดิมต้องส่ง `thread_id` ต่อ case — checkpointer บังคับ)

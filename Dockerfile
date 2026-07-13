@@ -35,8 +35,9 @@ USER app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # Default DB_PATH points inside the volume mount; override via --env-file if needed
-    DB_PATH=/app/data/portfolio.db
+    # Default DB paths point inside the volume mount; override via --env-file if needed
+    DB_PATH=/app/data/portfolio.db \
+    CHECKPOINT_DB_PATH=/app/data/checkpoints.db
 
 EXPOSE 8000
 

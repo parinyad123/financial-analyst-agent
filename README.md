@@ -143,6 +143,8 @@ POST /portfolio/{id}/ask   → {portfolio_id, query, response, trace_id}
                              body: {"query": "which holding is riskiest?"}
 ```
 
+**Conversation memory.** `/analyze/stock`, `/analyze/portfolio`, and `/portfolio/{id}/ask` all accept an optional `session_id` — the LangGraph checkpointer thread (SQLite-backed, so it survives a restart). Ask "ราคา NVDA เท่าไหร่", then just "แล้วข่าวล่ะ", and the follow-up resolves to NVDA news. Omitting `session_id` mints a fresh thread per call, i.e. the previous stateless behaviour, which is what keeps the single-turn routing suite honest. Memory also *creates* a hazard worth naming: the system prompt's "every number must come from a tool call" rule was written for single-turn, so nothing stopped the model from re-quoting a price fetched four turns ago as the current one — a separate runtime instruction (not an edit to the system prompt) blocks that, and a test asserts the re-ask actually re-calls the tool.
+
 `POST /portfolio/{id}/ask` lets you ask free-text questions about a saved portfolio *in the same view as its tracking report*. It routes through the general agent (so the planner can freely reach for news/regime/price tools) while injecting the current tracking report as context — so portfolio-level questions ("which holding is riskiest?") are answered from the already-computed risk contribution without a redundant tool call. The injected context is stripped of the portfolio id so it doesn't collide with the deterministic pre-route.
 
 ---

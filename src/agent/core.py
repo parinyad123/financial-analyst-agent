@@ -1,11 +1,19 @@
 import logging
 import re
+import sqlite3
+import uuid
 from datetime import datetime
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    trim_messages,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_groq import ChatGroq
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -14,7 +22,7 @@ from langsmith.run_helpers import get_current_run_tree
 from pydantic import BaseModel, Field
 
 from src.agent.prompts import SYSTEM_PROMPT
-from src.config import GROQ_API_KEY, PROJECT_NAME, ls_client, tracer
+from src.config import CHECKPOINT_DB_PATH, GROQ_API_KEY, PROJECT_NAME, ls_client, tracer
 from src.tools.financials import get_stock_financials
 from src.tools.hurst import get_hurst_exponent
 from src.tools.news import search_market_news
@@ -134,8 +142,29 @@ Critical routing rules:
 5. Portfolio risk given weights/amounts → analyze_portfolio_risk (never split
    into per-ticker get_stock_price calls).
 6. Existing/tracked portfolio P&L → track_portfolio.
+7. FOLLOW-UP QUESTIONS: if a [CONVERSATION HISTORY] block is provided and the query
+   refers back to it ("ตัวนั้น", "มัน", "อันนี้", "แล้ว...ล่ะ", "เทียบกับ X หน่อย",
+   "then what about..."), first resolve WHICH ticker/entity the query means from that
+   history, then pick tools for that entity. Example: "ราคา NVDA เท่าไหร่" followed by
+   "แล้วข่าวล่ะ" → the follow-up is about NVDA news → search_market_news (NOT get_stock_price
+   again — the user already has the price).
 When genuinely uncertain, prefer including a relevant tool over omitting it,
 but NEVER include get_stock_price for a pure fundamentals question (rule 1)."""
+
+
+# Injected as a runtime SystemMessage ONLY on turns that have prior history — same pattern
+# as [ROUTING PLAN] below. SYSTEM_PROMPT is NOT edited (see docs/ARCHITECTURE.md#system-prompt).
+# Guards a hazard that memory itself introduces: SYSTEM_PROMPT's "every number must come from a
+# tool call" rule was written for single-turn, so nothing stops the model from re-quoting a price
+# fetched 4 turns ago as if it were current. English negative instruction — more reliable for
+# gpt-oss-120b than Thai (critical rule #4).
+CONVERSATION_CONTEXT_NOTE = (
+    "[CONVERSATION CONTEXT] Earlier messages in this thread are snapshots from the moment "
+    "they were fetched — they are NOT current.\n"
+    "ถ้าผู้ใช้ถามข้อมูลปัจจุบัน (ราคา / ข่าว / metrics) ต้องเรียก tool ใหม่เสมอ\n"
+    "NEVER cite a number from a previous turn as if it were the current value. "
+    "If you reference an earlier figure, say explicitly when it was fetched."
+)
 
 
 class RoutingPlan(BaseModel):
@@ -191,6 +220,62 @@ def _last_human_query(messages: list) -> str:
         if isinstance(msg, HumanMessage):
             return msg.content if isinstance(msg.content, str) else str(msg.content)
     return messages[-1].content if messages else ""
+
+
+def _last_human_index(messages: list) -> int:
+    """Index of the current turn's HumanMessage (-1 if none). `> 0` ⇒ this thread has
+    prior history, which is what gates CONVERSATION_CONTEXT_NOTE and the planner's
+    history block."""
+    return max(
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)),
+        default=-1,
+    )
+
+
+def _recent_dialogue(messages: list, max_turns: int = 6, clip: int = 300) -> str:
+    """Compact Human/AI transcript of PRIOR turns for the planner.
+
+    ToolMessages are excluded on purpose: they are large raw dumps (a track report is
+    thousands of chars) and the planner only needs to know what was discussed, not the
+    figures. The trailing HumanMessage is excluded too — that is the query being planned."""
+    prior = messages[: _last_human_index(messages)] if _last_human_index(messages) > 0 else []
+    lines = []
+    for m in prior:
+        if isinstance(m, HumanMessage):
+            lines.append(f"User: {str(m.content)[:clip]}")
+        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+            lines.append(f"Assistant: {m.content[:clip]}")
+    return "\n".join(lines[-max_turns:])
+
+
+# Rough char→token ratio; exact counting is not worth an extra tokenizer dependency here.
+_MAX_HISTORY_TOKENS = 6000
+
+
+def _approx_tokens(msgs) -> int:
+    return sum(len(str(getattr(m, "content", "") or "")) for m in msgs) // 4
+
+
+def _trim_history(messages: list) -> list:
+    """Cap conversation context so accumulated tool dumps cannot blow the window.
+
+    start_on="human" is load-bearing: it guarantees the window never begins with an
+    orphan ToolMessage whose parent AIMessage(tool_calls) was trimmed away — Groq
+    rejects that pairing with a 400. If the budget cannot fit even one turn, fall back
+    to the current turn intact rather than dropping the user's question."""
+    trimmed = trim_messages(
+        messages,
+        token_counter=_approx_tokens,
+        max_tokens=_MAX_HISTORY_TOKENS,
+        strategy="last",
+        start_on="human",
+        include_system=False,
+        allow_partial=False,
+    )
+    if trimmed:
+        return trimmed
+    idx = _last_human_index(messages)
+    return messages[idx:] if idx >= 0 else messages
 
 
 def _extract_ticker(query: str, sibling_calls: list) -> str | None:
@@ -262,15 +347,25 @@ def build_agent():
         to `messages`, so the structured-output tool call does NOT leak into
         the tool set that callers count from event['messages']. A deterministic
         portfolio_id match (_plan_override) short-circuits the LLM call entirely
-        when it applies — cheaper and immune to semantic drift (case 12)."""
+        when it applies — cheaper and immune to semantic drift (case 12).
+
+        With conversation memory, prior turns are passed as a separate history block so
+        follow-ups ("แล้วข่าวล่ะ") can be resolved to the right ticker. _plan_override
+        still sees ONLY the latest human query — feeding it history would let a
+        portfolio_id mentioned several turns ago force track_portfolio forever."""
         query = _last_human_query(state["messages"])
         override = _plan_override(query)
         if override:
             return {"plan": override}
-        try:
-            plan = planner_model.invoke(
-                [SystemMessage(content=PLANNER_PROMPT), HumanMessage(content=query)]
+        history = _recent_dialogue(state["messages"])
+        planner_msgs = [SystemMessage(content=PLANNER_PROMPT)]
+        if history:
+            planner_msgs.append(
+                SystemMessage(content=f"[CONVERSATION HISTORY]\n{history}")
             )
+        planner_msgs.append(HumanMessage(content=query))
+        try:
+            plan = planner_model.invoke(planner_msgs)
             chosen = [n for n in (plan.tools or []) if n in _ALL_TOOL_NAMES]
         except Exception as exc:  # planner failure → safe fallback (see below)
             _logger.warning("[planner] failed (%s) — falling back to all tools", exc)
@@ -305,10 +400,14 @@ def build_agent():
         Runtime-only — SYSTEM_PROMPT is unchanged. See docs/v2-stategraph-routing.md."""
         plan = set(state.get("plan", []))
         planned_list = [n for n in _TOOL_ORDER if n in plan]
-        # First turn = no tool has run yet (input is just the HumanMessage).
+        # First turn of THIS user question = no tool has run for it yet.
         first_turn = bool(state["messages"]) and isinstance(state["messages"][-1], HumanMessage)
+        # Prior turns exist ⇒ the stale-number hazard applies (see CONVERSATION_CONTEXT_NOTE).
+        has_history = _last_human_index(state["messages"]) > 0
 
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        if has_history:
+            messages.append(SystemMessage(content=CONVERSATION_CONTEXT_NOTE))
         if first_turn and planned_list:
             messages.append(
                 SystemMessage(
@@ -319,7 +418,7 @@ def build_agent():
                     )
                 )
             )
-        messages += state["messages"]
+        messages += _trim_history(state["messages"])
 
         response = (select_model if first_turn else synth_model).invoke(messages)
 
@@ -368,11 +467,29 @@ def build_agent():
     graph.add_edge("planner", "agent")
     graph.add_conditional_edges("agent", route_after_agent, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    # check_same_thread=False: run_financial_agent is sync and callers run it via
+    # asyncio.to_thread, so the connection is touched from worker threads.
+    conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+    checkpointer.setup()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # สร้าง graph ครั้งเดียวระดับ module — reuse ทุก request
 _agent_graph = build_agent()
+
+
+def thread_has_history(session_id: str | None) -> bool:
+    """True if this thread already holds messages — lets callers avoid re-injecting
+    context they already put in the thread on turn 1 (see /portfolio/{id}/ask)."""
+    if not session_id:
+        return False
+    try:
+        snapshot = _agent_graph.get_state({"configurable": {"thread_id": session_id}})
+    except Exception as exc:
+        _logger.warning("[memory] get_state failed for %r (%s)", session_id, exc)
+        return False
+    return bool(snapshot and snapshot.values and snapshot.values.get("messages"))
 
 
 @traceable(
@@ -386,9 +503,15 @@ def run_financial_agent(
     query: str,
     tickers: list[str] | None = None,
     analysis_type: str = "general",
+    session_id: str | None = None,
 ) -> dict:
     """Main entry point — groups all sub-runs (LLM calls + tool calls) under 1 parent trace.
-    Returns run_id for 1:1 mapping to LangSmith trace URL."""
+    Returns run_id for 1:1 mapping to LangSmith trace URL.
+
+    session_id = the checkpointer thread. Omitting it mints a fresh thread per call, which
+    reproduces the pre-memory stateless behavior — so existing single-turn callers and the
+    routing regression keep their semantics."""
+    thread_id = session_id or str(uuid.uuid4())
     config = RunnableConfig(
         run_name=f"query_{analysis_type}_{datetime.now().strftime('%H%M%S')}",
         callbacks=[tracer],                        # explicit tracer — ไม่พึ่ง env
@@ -397,7 +520,9 @@ def run_financial_agent(
             "query": query,
             "tickers": tickers,
             "analysis_type": analysis_type,
+            "session_id": thread_id,
         },
+        configurable={"thread_id": thread_id},     # required once a checkpointer is compiled in
     )
 
     # diagnostic: repr() แสดง raw Python string — ถ้าเห็น \u0e?? = unicode ถูก, ถ้าเห็น ? literal = input เพี้ยนตั้งแต่ decode
@@ -426,4 +551,5 @@ def run_financial_agent(
         "tickers": tickers,
         "analysis_type": analysis_type,
         "run_id": str(rt.id) if rt else None,
+        "session_id": thread_id,
     }
